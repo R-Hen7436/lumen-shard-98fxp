@@ -1,215 +1,302 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <dirent.h>
+#include <arpa/inet.h>
 
-#include <iostream>      // Include input/output stream operations (cout, cin)
-#include <string>         // Include string manipulation functions
-#include <sys/socket.h>   // Include socket programming functions (socket, bind, setsockopt)
-#include <netinet/in.h>   // Include internet address structures (sockaddr_in, INADDR_ANY)
-#include <unistd.h>       // Include POSIX operating system functions (close)
+const int MAX_PORTS = 5;
+const int PORT_START = 8080;
+const int PORT_END = 8084;
+const int MAX_FILES = 100;
+const int MAX_FILENAME_LENGTH = 256;
 
-using namespace std;      // Use standard namespace to avoid std:: prefix
+// Single port data
+typedef struct {
+    int port;
+    int folder_id;
+    char folder_path[256];
+    int socket_fd;
+    int is_bound;
+} port_data_t;
 
-// Function declarations - Tell compiler these functions exist before they're used
-void showMenu();           // Function to display the main menu
-bool isPortAvailable(int port);  // Function to test if a port is available
-void findAvailablePorts();       // Function to scan and find available ports
-int selectPort();                // Function to get user port selection
+// Global instance data for multiple bound ports
+port_data_t bound_ports[MAX_PORTS];
+int bound_port_count = 0;
+char unique_files[MAX_FILES][MAX_FILENAME_LENGTH];
+int unique_file_count = 0;
 
-/**
- * Scans and displays available network ports for binding
- * 
- * This function tests ports 8080-8084 to determine which ones are available
- * for socket binding. It creates temporary test sockets to check port availability
- * and stores the results in an array for user selection.
- */
-void findAvailablePorts() {
-    const int MAX_PORTS = 5;        // Maximum number of ports to check
-    const int PORT_START = 8080;    // Starting port number in range
-    const int PORT_END = 8084;      // Ending port number in range
+// Checks if a specific port is available for binding
+// Returns 1 if port is free, 0 if port is already in use
+// Used by try_bind_port() to test ports before actual binding
+int is_port_available(int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return 0;
+    }
 
-    int available_ports[MAX_PORTS]; // Array to store found available ports
-    int count = 0;                  // Counter for number of available ports found
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
 
-    // Iterate through port range and test each port for availability
-    for (int port = PORT_START; port <= PORT_END; port++) {
-        if(isPortAvailable(port)) {  // Check if current port is available
-            available_ports[count++] = port;  // Store available port and increment counter
+    int result = bind(sock, (struct sockaddr*)&addr, sizeof(addr));
+    close(sock);
+
+    return result == 0;
+}
+
+// Actually binds to a port and starts listening for connections
+// Returns socket file descriptor on success, -1 on failure
+// Called by try_bind_port() when a port is confirmed available
+int bind_and_listen(int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (listen(sock, 5) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
+// Adds a filename to the unique files list, avoiding duplicates
+// Checks if file already exists before adding to prevent duplicates
+// Called by scan_folder_files() when it finds files in folders
+void add_unique_file(const char* filename) {
+    // Check if file already exists in the list
+    for (int i = 0; i < unique_file_count; i++) {
+        if (strcmp(unique_files[i], filename) == 0) {
+            return; // File already exists, don't add duplicate
         }
     }
     
-    // Display found ports in a user-friendly format with commas
-    cout << "Found port ";  // Print start of message
-    for(int i = 0; i < count; i++){  // Loop through all found ports
-        cout << available_ports[i];   // Print port number
-        if(i < count -1) cout << ", ";  // Add comma if not the last port
+    // Add new unique file
+    if (unique_file_count < MAX_FILES) {
+        strcpy(unique_files[unique_file_count], filename);
+        unique_file_count++;
     }
-    cout << "." << endl << endl;  // Print period and add two newlines
 }
 
-/**
- * FUNCTION SUMMARY:
- * This function scans ports 8080-8084 by creating test sockets and attempting to bind them.
- * It stores available ports in an array and displays them in a comma-separated list.
- * The function handles the port discovery phase of the application startup.
- */
-
-/** 
- * Tests if a specific port is available for binding
- * 
- * Creates a test socket and attempts to bind it to the specified port.
- * If binding succeeds, the port is available. The function properly
- * cleans up resources and handles errors gracefully.
- * 
- * @param port The port number to test (should be in range 8080-8084)
- * @return true if port is available, false otherwise
- */ 
-bool isPortAvailable(int port) {
-    // Create a test socket for port availability checking
-    int test_socket = socket(AF_INET, SOCK_STREAM, 0);  // Create TCP socket, AF_INET = IPv4
-    if(test_socket < 0) {  // Check if socket creation failed
-        return false;  // Return false if socket creation failed
-    }
-
-    // Set socket options for reuse (allows binding to recently used ports)
-    int opt = 1;  // Option value to enable socket reuse
-    if(setsockopt(test_socket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-        close(test_socket);  // Close socket if option setting fails
-        return false;  // Return false if socket option setting failed
+// Scans a specific folder and adds all files to the unique files list
+// Opens a directory, reads all files, and calls add_unique_file() for each
+// Called by try_bind_port() after successful binding and by listAvailableFiles()
+void scan_folder_files(const char* folder_path) {
+    DIR *dr = opendir(folder_path);
+    if (dr == NULL) {
+        printf("Could not open directory %s\n", folder_path);
+        return;
     }
     
-    // Configure socket address structure for binding test
-    struct sockaddr_in test_addr;  // Create address structure for binding
-    test_addr.sin_family = AF_INET;           // Set address family to IPv4
-    test_addr.sin_addr.s_addr = INADDR_ANY;   // Bind to all available network interfaces
-    test_addr.sin_port = htons(port);         // Convert port to network byte order (big-endian)
+    struct dirent *de;
+    printf("Scanning folder %s... ", folder_path);
     
-    // Attempt to bind the test socket to the port
-    int bind_result = bind(test_socket, (struct sockaddr*)&test_addr, sizeof(test_addr));  // Try to bind socket
-    close(test_socket);  // Always close the test socket to free resources
-    
-    return bind_result == 0;  // Return true if binding succeeded (bind returns 0 on success)
-}
-
-/**
- * FUNCTION SUMMARY:
- * This function creates a temporary socket and attempts to bind it to test port availability.
- * It sets socket reuse options to handle recently used ports and properly cleans up resources.
- * Returns true if the port is available for binding, false otherwise.
- */
-
-/**
- * Prompts user to select a port and validates the input
- * 
- * Gets port selection from user input and validates it's within
- * the allowed range (8080-8084). Falls back to default port 8080
- * if invalid input is provided.
- * 
- * @return The selected port number (validated)
- */
-int selectPort() {
-    int port;  // Variable to store user's port selection
-    cout << "? ";  // Print prompt for user input
-    cin >> port;   // Read user input and store in port variable
-    
-    // Validate port range and provide fallback to default
-    if(port < 8080 || port > 8084) {  // Check if port is outside valid range
-        cout << "Invalid port. Using default port 8080." << endl;  // Print error message
-        port = 8080;  // Set port to default value
+    int files_found = 0;
+    while ((de = readdir(dr)) != NULL) {
+        // Skip . and .. directory entries
+        if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0) {
+            add_unique_file(de->d_name);
+            files_found++;
+        }
     }
     
-    return port;  // Return the validated port number
+    printf("found %d file(s)\n", files_found);
+    closedir(dr);
 }
 
-/**
- * FUNCTION SUMMARY:
- * This function handles user input for port selection and validates the input range.
- * It provides a fallback to port 8080 if the user enters an invalid port number.
- * Ensures the application always has a valid port to work with.
- */
-
-/**
- * Displays the main application menu
- * 
- * Shows available options for file operations including listing files,
- * downloading files, checking download status, and exiting the application.
- */
-void showMenu() {
-    cout << endl;  // Print empty line for spacing
-    cout << " Seed App" << endl;  // Print application title
-    cout << " [1] List available files." << endl;  // Print menu option 1
-    cout << " [2] Download file." << endl;        // Print menu option 2
-    cout << " [3] Download status." << endl;      // Print menu option 3
-    cout << " [4] Exit." << endl;                 // Print menu option 4
-    cout << endl;  // Print empty line for spacing
-}
-
-/**
- * FUNCTION SUMMARY:
- * This function displays the main menu interface with numbered options for the user.
- * It provides a clean, formatted display of available application functions.
- * The menu is the primary user interface for navigating the application.
- */
-
-/**
- * Main application entry point
- * 
- * The main function orchestrates the entire application flow:
- * 1. Port discovery and selection
- * 2. Socket setup and binding
- * 3. Main menu loop for file operations
- * 4. Port switching capability
- * 
- * The application runs continuously until explicitly terminated,
- * allowing users to switch between different ports for file sharing.
- */
-int main() {
-    bool running = true;  // Flag to control main program loop
+// Attempts to bind to a specific port and set up its folder
+// First checks if port is available, then binds and scans its folder
+// Called by sequential_port_scan() for each port in the range
+int try_bind_port(int port) {
+    printf("Trying port %d... ", port);
     
-    while(running) {  // Main program loop - continues until running becomes false
-        cout << "Seed App" << endl;  // Print application title
-        cout << "Finding available ports ... ";  // Print status message
+    if (is_port_available(port)) {
+        printf("available, attempting to bind... ");
         
-        // Find and display available ports for user selection
-        findAvailablePorts();  // Call function to scan and show available ports
-        
-        // Get port selection from user and validate
-        int selected_port = selectPort();  // Get user's port choice and store it
-        
-        cout << "Listening at port " << selected_port << "." << endl << endl;  // Confirm selected port
-        
-        // Main application loop - handles user menu selections
-        int choice;  // Variable to store user's menu selection
-        do {  // Do-while loop for menu interaction
-            showMenu();  // Display the menu options
-            cout << "? ";  // Print prompt for user input
-            cin >> choice;  // Read user's choice and store in choice variable
+        int sock = bind_and_listen(port);
+        if (sock >= 0) {
+            // Successfully bound - add to our bound ports list
+            bound_ports[bound_port_count].port = port;
+            bound_ports[bound_port_count].folder_id = port - PORT_START + 1;
+            bound_ports[bound_port_count].socket_fd = sock;
+            bound_ports[bound_port_count].is_bound = 1;
+            snprintf(bound_ports[bound_port_count].folder_path, 
+                     sizeof(bound_ports[bound_port_count].folder_path), 
+                     "files/%d", bound_ports[bound_port_count].folder_id);
             
-            // Process user menu selection using switch statement
-            switch(choice) {
-                case 1:  // If user chose option 1
-                    cout << "List available files feature not implemented yet." << endl;  // Placeholder message
-                    break;  // Exit switch statement
-                case 2:  // If user chose option 2
-                    cout << "Download file feature not implemented yet." << endl;  // Placeholder message
-                    break;  // Exit switch statement
-                case 3:  // If user chose option 3
-                    cout << "Download status feature not implemented yet." << endl;  // Placeholder message
-                    break;  // Exit switch statement
-                case 4:  // If user chose option 4 (exit)
-                    cout << "Exiting to port selection..." << endl;  // Print exit message
-                    break;  // Exit switch statement
-                default:  // If user entered invalid choice
-                    cout << "Invalid choice. Please try again." << endl;  // Print error message
-            }
-        } while(choice != 4);  // Continue loop until user chooses to exit (option 4)
+            printf("SUCCESS!\n");
+            printf("Bound to port %d, assigned folder %s\n", 
+                   bound_ports[bound_port_count].port, 
+                   bound_ports[bound_port_count].folder_path);
+            
+            // Scan files from this port's folder
+            scan_folder_files(bound_ports[bound_port_count].folder_path);
+            
+            bound_port_count++;
+            return 1; // Success
+        } else {
+            printf("failed to bind.\n");
+        }
+    } else {
+        printf("in use.\n");
     }
     
-    return 0;  // Return 0 to indicate successful program completion
+    return 0; // Failed to bind
 }
 
-/**
- * FUNCTION SUMMARY:
- * This is the main function that controls the entire application flow.
- * It implements a two-level loop structure: outer loop for port selection and inner loop for menu operations.
- * The function handles port discovery, user input validation, and menu navigation.
- * Currently shows placeholder messages for unimplemented features while maintaining the core structure.
- * The application can switch between different ports and provides a foundation for future file sharing functionality.
- */
+// Scans ports 8080-8084 one by one until it finds an available port
+// Stops after successfully binding to the first available port
+// Called by main() to find and bind to exactly one port per instance
+void sequential_port_scan() {
+    printf("Starting sequential port scanning...\n");
+    
+    for (int port = PORT_START; port <= PORT_END; port++) {
+        if (try_bind_port(port)) {
+            // Successfully bound to a port, stop scanning
+            printf("Port binding successful. Stopping scan.\n");
+            break;
+        }
+        
+        // Small delay between port attempts
+        sleep(1);
+    }
+    
+    printf("\nPort scanning complete.\n");
+    printf("Successfully bound to %d port(s).\n", bound_port_count);
+}
+
+// Shows all unique files from the bound port's folder (Menu Option 1)
+// Rescans the folder to get fresh file list and displays them
+// Called by show_menu() when user selects option 1
+void listAvailableFiles() {
+    printf("Searching for files... ");
+    
+    // Clear the unique files list and rescan all bound ports
+    unique_file_count = 0;
+    
+    // Rescan files from all bound ports
+    for (int i = 0; i < bound_port_count; i++) {
+        scan_folder_files(bound_ports[i].folder_path);
+    }
+    
+    printf("done.\n");
+    printf("Files available.\n");
+    
+    if (unique_file_count == 0) {
+        printf("No files found in any bound port directories.\n");
+    } else {
+        for (int i = 0; i < unique_file_count; i++) {
+            printf("[%d] %s\n", i + 1, unique_files[i]);
+        }
+    }
+    
+    // Show which ports are currently bound
+    printf("\nCurrently bound ports: ");
+    for (int i = 0; i < bound_port_count; i++) {
+        printf("%d ", bound_ports[i].port);
+    }
+    printf("(Total: %d)\n", bound_port_count);
+}
+
+// Displays the main menu and handles user input
+// Loops until user chooses option 4 (Exit)
+// Called by main() after successful port binding
+void show_menu() {
+    int choice;
+    do {
+        printf("\nSeed App Menu (Port %d - Folder %s)\n", 
+               bound_ports[0].port, bound_ports[0].folder_path);
+        printf("[1] List available files.\n");
+        printf("[2] Download file.\n");
+        printf("[3] Download status.\n");
+        printf("[4] Exit.\n");
+        printf("\n?");
+
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+                printf("Listing available files...\n\n");
+                listAvailableFiles();
+                break;
+            case 2:
+                printf("Downloading file...\n");
+                // Add your logic here
+                break;
+            case 3:
+                printf("Checking download status...\n");
+                // Add your logic here
+                break;
+            case 4:
+                printf("Exiting...\n");
+                break;
+            default:
+                printf("Invalid choice. Please try again.\n");
+        }
+    } while (choice != 4);
+}
+
+// Main program entry point - coordinates the entire application flow
+// 1. Initializes variables, 2. Scans for available port, 3. Shows menu, 4. Cleans up
+// This is where the program starts and ends
+int main() {
+    printf("Starting Seed App...\n");
+    printf("Will scan ports %d to %d sequentially (one at a time)...\n", PORT_START, PORT_END);
+    
+    // Initialize bound ports array
+    bound_port_count = 0;
+    unique_file_count = 0;
+    
+    // Perform sequential port scanning and binding
+    sequential_port_scan();
+    
+    if (bound_port_count == 0) {
+        printf("\nNo available ports found in range %d-%d. Exiting...\n", 
+               PORT_START, PORT_END);
+        return 1;
+    }
+    
+    printf("\nThis instance is serving files from %d folder:\n", bound_port_count);
+    for (int i = 0; i < bound_port_count; i++) {
+        printf("  Port %d → %s\n", bound_ports[i].port, bound_ports[i].folder_path);
+    }
+    
+    printf("\nTotal unique files found: %d\n", unique_file_count);
+    
+    // Show the menu
+    show_menu();
+    
+    // Clean up all bound sockets
+    printf("Cleaning up...\n");
+    for (int i = 0; i < bound_port_count; i++) {
+        if (bound_ports[i].socket_fd >= 0) {
+            close(bound_ports[i].socket_fd);
+            printf("Closed socket for port %d\n", bound_ports[i].port);
+        }
+    }
+    
+    printf("Goodbye!\n");
+    return 0;
+}
+
+
