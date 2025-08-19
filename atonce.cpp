@@ -154,6 +154,7 @@ void scan_all_folders() {
  * Tests if port is available, binds to it, and keeps it active.
  * Each thread is responsible for one port and its associated folder.
  */
+ /*
 void* port_thread_function(void* arg) {
     // Cast the generic pointer back to our thread data structure
     port_thread_data_t* thread_data = (port_thread_data_t*)arg;
@@ -201,7 +202,7 @@ void* port_thread_function(void* arg) {
     }
     
     return NULL;
-}
+} */
 
 int scanning_active = 1;
 pthread_mutex_t scanner_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -379,7 +380,7 @@ void show_menu() {
                 listAvailableFiles();
                 break;
             case 2:
-                download_file();  
+                // download_file();  
                 break;
             case 3:
                 printf("Checking download status...\n");
