@@ -149,53 +149,37 @@ void scan_all_folders() {
     }
 }
 
-/*
- * Thread function that handles a single port.
- * Tests if port is available, binds to it, and keeps it active.
- * Each thread is responsible for one port and its associated folder.
- */
 void* port_thread_function(void* arg) {
-    // Cast the generic pointer back to our thread data structure
     port_thread_data_t* thread_data = (port_thread_data_t*)arg;
     
-    // Print which port we're trying to use
     printf("[Thread %d] Trying port %d... ", thread_data->thread_index, thread_data->port);
     
-    // First check if the port is available
     if (is_port_available(thread_data->port)) {
         printf("available, attempting to bind... ");
         
-        // If available, try to permanently bind and listen
         int sock = bind_and_listen(thread_data->port);
         if (sock >= 0) {
-            // Success! Update thread data with connection info
             thread_data->socket_fd = sock;
             thread_data->is_bound = 1;
             
-            // Print success messages
             printf("SUCCESS!\n");
             printf("[Thread %d] Bound to port %d, assigned folder %s\n", 
                    thread_data->thread_index, thread_data->port, thread_data->folder_path);
             
-            // Thread-safely increment bound port counter
             pthread_mutex_lock(&bound_ports_mutex);
             bound_port_count++;
             pthread_mutex_unlock(&bound_ports_mutex);
             
-            // Scan this thread's folder for files
-            scan_folder_files(thread_data->folder_path);
+            scan_folder_files(thread_data->folder_path); //files are added to the global list
             
-            // Keep thread alive (this is where client handling would go)
             while (1) {
                 sleep(1);
             }
         } else {
-            // Binding failed (port might have been taken by another process)
             printf("failed to bind.\n");
             thread_data->is_bound = 0;
         }
     } else {
-        // Port is already in use
         printf("in use.\n");
         thread_data->is_bound = 0;
     }
@@ -206,41 +190,28 @@ void* port_thread_function(void* arg) {
 int scanning_active = 1;
 pthread_mutex_t scanner_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* 
- * Thread function that tries ports sequentially (8080-8084) until it finds one available.
- * When a port is found, it binds to it and scans all folders for files.
- * This is the main server initialization function.
- */
 void* sequential_port_scanner(void* arg) {
-    // Try each port in sequence (8080, 8081, 8082, 8083, 8084)
     for (int i = 0; i < MAX_PORTS; i++) {
         int port = PORT_START + i;
         
-        // First check if port is available (quick test)
         if (is_port_available(port)) {
-            // If available, try to permanently bind and listen
             int sock = bind_and_listen(port);
             if (sock >= 0) {
-                // Success! Store all the port information in the global array
-                port_threads[0].port = port;                // Which port we're using
-                port_threads[0].folder_id = i + 1;          // Maps to folder (files/1, files/2, etc.)
-                port_threads[0].thread_index = 0;           // This is thread #0
-                port_threads[0].socket_fd = sock;           // Save socket descriptor for later
-                port_threads[0].is_bound = 1;               // Mark as successfully bound
-                
-                // Create the folder path string (e.g., "files/1")
+                port_threads[0].port = port;
+                port_threads[0].folder_id = i + 1;
+                port_threads[0].thread_index = 0;
+                port_threads[0].socket_fd = sock;
+                port_threads[0].is_bound = 1;
                 snprintf(port_threads[0].folder_path, sizeof(port_threads[0].folder_path), 
-                         "files/%d", port_threads[0].folder_id);
+                         "files/%d", port_threads[0].folder_id); //this will set the folder path
                 
-                // Thread-safely update the bound port counter
                 pthread_mutex_lock(&bound_ports_mutex);
                 bound_port_count = 1;
                 pthread_mutex_unlock(&bound_ports_mutex);
                 
-                // Scan ALL folders for files, not just the one we're bound to
+                // Scan all port folders, not just the bound one
                 scan_all_folders();
                 
-                // Stop after finding first available port
                 break;
             }
         }
@@ -249,61 +220,43 @@ void* sequential_port_scanner(void* arg) {
     return NULL;
 }
 
-/*
- * Initializes all thread data and starts the port scanner thread.
- * This is the main function that sets up the server.
- */
 void start_sequential_scanner() {
     printf("Finding available ports...");
-    fflush(stdout);  // Ensure message is displayed immediately
+    fflush(stdout);
     
-    // Initialize all thread data with default values
     for (int i = 0; i < MAX_PORTS; i++) {
-        port_threads[i].port = -1;           // No port assigned yet
-        port_threads[i].folder_id = -1;      // No folder assigned yet
-        port_threads[i].thread_index = i;    // Give each thread its index
-        port_threads[i].socket_fd = -1;      // No socket connection yet
-        port_threads[i].is_bound = 0;        // Not bound to any port yet
+        port_threads[i].port = -1;
+        port_threads[i].folder_id = -1;
+        port_threads[i].thread_index = i;
+        port_threads[i].socket_fd = -1;
+        port_threads[i].is_bound = 0;
     }
     
-    // Create a new thread to run the port scanner
     pthread_t scanner_thread;
     if (pthread_create(&scanner_thread, NULL, sequential_port_scanner, NULL) != 0) {
         printf("Failed to create scanner thread\n");
         return;
     }
     
-    // Wait for the scanner thread to complete before continuing
     pthread_join(scanner_thread, NULL);
 }
 
-/*
- * Lists all unique files found in all folders (files/1 through files/5).
- * This function is called when the user selects option 1 from the menu.
- */
 void listAvailableFiles() {
     printf("Searching for files... ");
     
-    // Thread-safely reset the file counter
     pthread_mutex_lock(&file_list_mutex);
     unique_file_count = 0;
     pthread_mutex_unlock(&file_list_mutex);
     
-    // Check each possible folder (files/1, files/2, files/3, files/4, files/5)
     for (int i = 1; i <= MAX_PORTS; i++) {
-        // Create the folder path string (e.g., "files/1")
         char folder_path[256];
         snprintf(folder_path, sizeof(folder_path), "files/%d", i);
         
-        // Try to open the directory
         DIR *dr = opendir(folder_path);
         if (dr != NULL) {
             struct dirent *de;
-            // Read each entry in the directory
             while ((de = readdir(dr)) != NULL) {
-                // Skip special directory entries "." and ".."
                 if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0) {
-                    // Add this file to our global list (if not already there)
                     add_unique_file(de->d_name);
                 }
             }
@@ -312,54 +265,16 @@ void listAvailableFiles() {
     }
     printf("Done.\n");
     
-    // Thread-safely display the list of files
     pthread_mutex_lock(&file_list_mutex);
     if (unique_file_count == 0) {
         printf("No files found.\n");
     } else {
-        // Print each file with a number
         for (int i = 0; i < unique_file_count; i++) {
             printf("[%d] %s\n", i + 1, unique_files[i]);
         }
     }
     pthread_mutex_unlock(&file_list_mutex);
 }
-
-/*
-void download_file() {
-    // First check if we have any files in our list
-    if (unique_file_count == 0) {
-        printf("No files available. Please list files first (option 1).\n");
-        return;
-    }
-    
-    // Get user's file selection
-    int file_id;
-    printf("\nEnter file ID: ");
-    scanf("%d", &file_id);
-    
-    // Validate selection
-    if (file_id < 1 || file_id > unique_file_count) {
-        printf("Invalid file ID.\n");
-        return;
-    }
-    
-    // Get selected filename
-    char selected_file[MAX_FILENAME_LENGTH];
-    pthread_mutex_lock(&file_list_mutex);
-    strcpy(selected_file, unique_files[file_id - 1]);
-    pthread_mutex_unlock(&file_list_mutex);
-    
-    printf("Locating seeders... ");
-    
-    
-    
-    
-    // Show download started message with exact format
-    printf("Download started. File: [%d] %s\n", file_id, selected_file);
-   
-}
-    */
 
 void show_menu() {
     int choice;
@@ -379,7 +294,8 @@ void show_menu() {
                 listAvailableFiles();
                 break;
             case 2:
-                download_file();  
+                printf("Downloading file...\n");
+                // download_file();
                 break;
             case 3:
                 printf("Checking download status...\n");

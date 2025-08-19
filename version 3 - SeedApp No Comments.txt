@@ -1,0 +1,159 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <dirent.h>
+#include <arpa/inet.h>
+
+const int MAX_PORTS = 5;
+const int PORT_START = 8080;
+const int PORT_END = 8084;
+const int MAX_FILES = 100;
+const int MAX_FILENAME_LENGTH = 256;
+
+void scan_folder_files(const char* folder_path);
+
+int current_port = 0;
+int current_socket = -1;
+char unique_files[MAX_FILES][MAX_FILENAME_LENGTH];
+int unique_file_count = 0;
+
+int find_and_bind_port() {
+    for (int port = PORT_START; port <= PORT_END; port++) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) continue;
+        
+        int opt = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(port);
+        
+        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            if (listen(sock, 5) == 0) {
+                printf("Finding available ports ... Found port %d.\n", port);
+                printf("Listening at port %d.\n\n", port);
+                
+                current_port = port;
+                current_socket = sock;
+                
+                for (int folder_id = 1; folder_id <= 5; folder_id++) {
+                    char folder_path[256];
+                    snprintf(folder_path, sizeof(folder_path), "files/%d", folder_id);
+                    scan_folder_files(folder_path);
+                }
+                
+                return sock;
+            }
+        }
+        close(sock);
+    }
+    return -1;
+}
+
+void add_unique_file(const char* filename) {
+    for (int i = 0; i < unique_file_count; i++) {
+        if (strcmp(unique_files[i], filename) == 0) {
+            return;
+        }
+    }
+    
+    if (unique_file_count < MAX_FILES) {
+        strcpy(unique_files[unique_file_count], filename);
+        unique_file_count++;
+    }
+}
+
+void scan_folder_files(const char* folder_path) {
+    DIR *dr = opendir(folder_path);
+    if (dr == NULL) {
+        return;
+    }
+    
+    struct dirent *de;
+    while ((de = readdir(dr)) != NULL) {
+        if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0) {
+            add_unique_file(de->d_name);
+        }
+    }
+    
+    closedir(dr);
+}
+
+void listAvailableFiles() {
+    printf("Searching for files... ");
+    
+    unique_file_count = 0;
+    
+    for (int folder_id = 1; folder_id <= 5; folder_id++) {
+        char folder_path[256];
+        snprintf(folder_path, sizeof(folder_path), "files/%d", folder_id);
+        scan_folder_files(folder_path);
+    }
+    
+    printf("done.\n");
+    printf("Files available.\n");
+    
+    if (unique_file_count == 0) {
+        printf(" No files found.\n");
+    } else {
+        for (int i = 0; i < unique_file_count; i++) {
+            printf("[%d] %s\n", i + 1, unique_files[i]);
+        }
+    }
+}
+
+void show_menu() {
+    int choice;
+    do {
+        printf("Seed App\n");
+        printf("[1] List available files.\n");
+        printf("[2] Download file.\n");
+        printf("[3] Download status.\n");
+        printf("[4] Exit.\n");
+        printf("\n? ");
+
+        scanf("%d", &choice);
+        printf("\n");
+
+        switch (choice) {
+            case 1:
+                listAvailableFiles();
+                printf("\n");
+                break;
+            case 2:
+                printf("Downloading file...\n");
+                break;
+            case 3:
+                printf("Checking download status...\n");
+                break;
+            case 4:
+                printf("Exiting...\n");
+                break;
+            default:
+                printf("Invalid choice. Please try again.\n");
+        }
+    } while (choice != 4);
+}
+
+int main() {
+    unique_file_count = 0;
+    
+    if (find_and_bind_port() < 0) {
+        printf("No available ports found. Exiting...\n");
+        return 1;
+    }
+    
+    show_menu();
+    
+    if (current_socket >= 0) {
+        close(current_socket);
+    }
+    
+    return 0;
+}
