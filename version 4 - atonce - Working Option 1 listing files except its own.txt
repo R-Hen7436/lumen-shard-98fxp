@@ -1,0 +1,278 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <sys/time.h>
+#include <fcntl.h>
+
+// Port configuration - easily changeable
+const int PORTS[] = {8080, 8081, 8082, 8083, 8084};
+const int MAX_PORTS = 5;
+const int MAX_FILES = 100;
+const int MAX_FILENAME_LENGTH = 256;
+const int CONNECTION_TIMEOUT = 5; // seconds
+
+//global variables
+typedef struct {
+    int port;
+    int folder_id;
+    char folder_path[256];
+    int socket_fd;
+    int is_bound;
+    pthread_t thread_id;
+    int thread_index;
+} port_thread_data_t;
+
+port_thread_data_t port_threads[MAX_PORTS];
+int bound_port_count = 0;
+char unique_files[MAX_FILES][MAX_FILENAME_LENGTH];
+int unique_file_count = 0;
+int my_bound_port = -1; // Track which port this instance is using
+
+pthread_mutex_t bound_ports_mutex = PTHREAD_MUTEX_INITIALIZER; 
+pthread_mutex_t file_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void setup_socket_addr(struct sockaddr_in* addr, int port) {
+    memset(addr, 0, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    addr->sin_addr.s_addr = INADDR_ANY;
+    addr->sin_port = htons(port);
+}
+
+//Checks if a port is available by attempting a temporary bind
+int is_port_available(int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return 0;
+    }
+
+    struct sockaddr_in addr;
+    setup_socket_addr(&addr, port);
+
+    int result = bind(sock, (struct sockaddr*)&addr, sizeof(addr)); 
+    close(sock);
+
+    return result == 0;
+}
+
+//This will permanently bind to the port and starts listening
+int bind_and_listen(int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    setup_socket_addr(&addr, port);
+
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (listen(sock, 5) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
+//this will help prevent duplicates
+void add_unique_file(const char* filename) {
+    pthread_mutex_lock(&file_list_mutex);
+    
+    for (int i = 0; i < unique_file_count; i++) {
+        if (strcmp(unique_files[i], filename) == 0) {
+            pthread_mutex_unlock(&file_list_mutex);
+            return;
+        }
+    }
+    
+    if (unique_file_count < MAX_FILES) {
+        strcpy(unique_files[unique_file_count], filename);
+        unique_file_count++;
+    }
+    
+    pthread_mutex_unlock(&file_list_mutex);
+}
+
+// Simplify the server startup:
+void start_single_port_server() {
+    printf("Finding available ports...");
+    fflush(stdout);
+    
+    for (int i = 0; i < MAX_PORTS; i++) {
+        int port = PORTS[i];
+        
+        if (is_port_available(port)) {
+            int sock = bind_and_listen(port);
+            if (sock >= 0) {
+                my_bound_port = port;
+                
+                // Set up port thread data
+                port_threads[0].port = port;
+                port_threads[0].folder_id = i + 1;
+                port_threads[0].thread_index = 0;
+                port_threads[0].socket_fd = sock;
+                port_threads[0].is_bound = 1;
+                snprintf(port_threads[0].folder_path, sizeof(port_threads[0].folder_path), 
+                         "files/%d", port_threads[0].folder_id);
+                
+                bound_port_count = 1;
+                
+                printf(" Found port %d.\n", port);
+                printf("Listening at port %d.\n", port);
+                
+                // No need for server thread anymore
+                return;
+            }
+        }
+    }
+    
+    printf(" No available ports found.\n");
+}
+
+// Discover files from all OTHER ports' folders (local file system, not network)
+void listAvailableFiles() {
+    printf("\nSearching for files... ");
+    
+    // Reset file counter
+    pthread_mutex_lock(&file_list_mutex);
+    unique_file_count = 0;
+    pthread_mutex_unlock(&file_list_mutex);
+    
+    // Find which folder ID corresponds to our bound port
+    int my_folder_id = -1;
+    for (int i = 0; i < MAX_PORTS; i++) {
+        if (PORTS[i] == my_bound_port) {
+            my_folder_id = i + 1; // folders are 1-indexed
+            break;
+        }
+    }
+    
+    printf("[DEBUG] My bound port: %d, My folder ID: %d (skipping files/%d)\n", 
+           my_bound_port, my_folder_id, my_folder_id);
+    
+    int folders_scanned = 0;
+    int total_files = 0;
+    
+    // Scan all folders EXCEPT our own
+    for (int folder_id = 1; folder_id <= MAX_PORTS; folder_id++) {
+        if (folder_id == my_folder_id) {
+            printf("[DEBUG] Skipping own folder files/%d\n", folder_id);
+            continue; // Skip our own folder
+        }
+        
+        char folder_path[256];
+        snprintf(folder_path, sizeof(folder_path), "files/%d", folder_id);
+        
+        printf("[DEBUG] Scanning %s... ", folder_path);
+        
+        DIR *dr = opendir(folder_path);
+        if (dr != NULL) {
+            struct dirent *de;
+            int files_in_folder = 0;
+            
+            while ((de = readdir(dr)) != NULL) {
+                if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0) {
+                    add_unique_file(de->d_name);
+                    files_in_folder++;
+                    total_files++;
+                }
+            }
+            closedir(dr);
+            folders_scanned++;
+            printf("found %d file(s)\n", files_in_folder);
+        } else {
+            printf("folder not found\n");
+        }
+    }
+    
+    printf("done.\n");
+    printf("[DEBUG] Scanned %d folders, found %d total files\n", folders_scanned, total_files);
+    
+    // Display results
+    pthread_mutex_lock(&file_list_mutex);
+    if (unique_file_count == 0) {
+        printf("No files found in other port folders.\n");
+    } else {
+        printf("Files available.\n");
+        for (int i = 0; i < unique_file_count; i++) {
+            printf("[%d] %s\n", i + 1, unique_files[i]);
+        }
+        printf("\n(Found files from %d other port folder(s))\n", folders_scanned);
+    }
+    pthread_mutex_unlock(&file_list_mutex);
+}
+
+void show_menu() {
+    int choice;
+    do {
+        printf("\nSeed App\n");
+        printf("[1] List available files.\n");
+        printf("[2] Download file.\n");
+        printf("[3] Download status.\n");
+        printf("[4] Exit.\n");
+        printf("[9] Test own server connection.\n"); // Hidden test option
+        printf("\n ? ");
+
+        scanf("%d", &choice);
+        printf("\n");
+
+        switch (choice) {
+            case 1:
+                listAvailableFiles();
+                break;
+            case 2:
+                printf("Downloading file...\n");
+                // Download functionality not implemented yet
+                break;
+            case 3:
+                printf("Checking download status...\n");
+                break;
+            case 4:
+                printf("Exiting...\n");
+                break;
+            case 9: // Hidden test option
+                // test_own_server(); // This function is removed
+                break;
+            default:
+                printf("Invalid choice. Please try again.\n");
+        }
+    } while (choice != 4);
+}
+
+int main() {
+    bound_port_count = 0;
+    unique_file_count = 0;
+    my_bound_port = -1;
+    
+    // Start single port server
+    start_single_port_server();
+    
+    if (my_bound_port == -1) {
+        printf("Could not bind to any port. Exiting.\n");
+        return 1;
+    }
+    
+    show_menu();
+    
+    // Clean up
+    if (port_threads[0].is_bound && port_threads[0].socket_fd >= 0) {
+        close(port_threads[0].socket_fd);
+    }
+    
+    pthread_mutex_destroy(&bound_ports_mutex);
+    pthread_mutex_destroy(&file_list_mutex);
+    
+    return 0;
+}

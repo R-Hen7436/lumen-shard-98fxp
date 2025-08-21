@@ -1,0 +1,539 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <sys/time.h>
+#include <fcntl.h>
+#include <errno.h> 
+
+
+const int PORTS[] = {8080, 8081, 8082, 8083, 8084};
+const int MAX_PORTS = 5;
+const int MAX_FILES = 100;
+const int MAX_FILENAME_LENGTH = 256;
+const int CONNECTION_TIMEOUT = 5; // seconds
+
+//global variables
+typedef struct {
+    int port;
+    int folder_id;
+    char folder_path[256];
+    int socket_fd;
+    int is_bound;
+    pthread_t thread_id;
+    int thread_index;
+} port_thread_data_t;
+
+port_thread_data_t port_threads[MAX_PORTS];
+int bound_port_count = 0;
+// Structure to track files and their source ports
+typedef struct {
+    char filename[MAX_FILENAME_LENGTH];
+    int source_port;
+} file_info_t;
+
+file_info_t unique_files[MAX_FILES];
+int unique_file_count = 0;
+int my_bound_port = -1; // Track which port this instance is using
+
+pthread_mutex_t bound_ports_mutex = PTHREAD_MUTEX_INITIALIZER; 
+pthread_mutex_t file_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void setup_socket_addr(struct sockaddr_in* addr, int port) {
+    memset(addr, 0, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    addr->sin_addr.s_addr = INADDR_ANY;
+    addr->sin_port = htons(port);
+}
+
+// //Checks if a port is available by attempting a temporary bind
+// int is_port_available(int port) {
+//     int sock = socket(AF_INET, SOCK_STREAM, 0);
+//     if (sock < 0) {
+//         return 0;
+//     }
+
+//     struct sockaddr_in addr;
+//     setup_socket_addr(&addr, port);
+
+//     int result = bind(sock, (struct sockaddr*)&addr, sizeof(addr)); 
+//     close(sock);
+
+//     return result == 0;
+// }
+
+//This will permanently bind to the port and starts listening
+int bind_and_listen(int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    setup_socket_addr(&addr, port);
+
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (listen(sock, 5) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
+//this will help prevent duplicates and track source ports
+void add_unique_file(const char* filename, int source_port) {
+    pthread_mutex_lock(&file_list_mutex);
+    
+    for (int i = 0; i < unique_file_count; i++) {
+        if (strcmp(unique_files[i].filename, filename) == 0) {
+            pthread_mutex_unlock(&file_list_mutex);
+            return;
+        }
+    }
+    
+    if (unique_file_count < MAX_FILES) {
+        strcpy(unique_files[unique_file_count].filename, filename);
+        unique_files[unique_file_count].source_port = source_port;
+        unique_file_count++;
+    }
+    
+    pthread_mutex_unlock(&file_list_mutex);
+}
+
+// Get files from our own folder (for serving to peers)
+void get_own_files(char* response, int max_size) {
+    int my_folder_id = -1;
+    for (int i = 0; i < MAX_PORTS; i++) {
+        if (PORTS[i] == my_bound_port) {
+            my_folder_id = i + 1;
+            break;
+        }
+    }
+    
+    if (my_folder_id == -1) {
+        strcpy(response, "");
+        return;
+    }
+    
+    char folder_path[256];
+    snprintf(folder_path, sizeof(folder_path), "files/%d", my_folder_id);
+    
+    response[0] = '\0';
+    DIR *dr = opendir(folder_path);
+    if (dr != NULL) {
+        struct dirent *de;
+        int file_count = 0;
+        
+        while ((de = readdir(dr)) != NULL) {
+            if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0) {
+                char file_entry[512];
+                snprintf(file_entry, sizeof(file_entry), "[%d] %s\n", ++file_count, de->d_name);
+                
+                if (strlen(response) + strlen(file_entry) < max_size - 1) {
+                    strcat(response, file_entry);
+                }
+            }
+        }
+        closedir(dr);
+    }
+}
+
+// Handle ports requests 
+void* client_request(void* arg) {
+    int client_fd = *(int*)arg;
+    free(arg);
+    
+    char buffer[1024];
+    ssize_t bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    if (bytes <= 0) {
+        close(client_fd);
+        return NULL;
+    }
+    buffer[bytes] = '\0';
+    
+    if (strcmp(buffer, "LIST") == 0) {
+        char response[2048];
+        get_own_files(response, sizeof(response));
+        send(client_fd, response, strlen(response), 0);
+    }
+    else if (strncmp(buffer, "DOWNLOAD ", 9) == 0) {
+        char filename[MAX_FILENAME_LENGTH];
+        strcpy(filename, buffer + 9); // Skip "DOWNLOAD "
+        
+        // Remove trailing whitespace/newlines
+        char *newline = strchr(filename, '\n');
+        if (newline) *newline = '\0';
+        
+        printf("SERVER: Download request for '%s'\n", filename);
+        
+        // Find the file in our folder
+        int my_folder_id = -1;
+        for (int i = 0; i < MAX_PORTS; i++) {
+            if (PORTS[i] == my_bound_port) {
+                my_folder_id = i + 1;
+                break;
+            }
+        }
+        
+        if (my_folder_id != -1) {
+            char file_path[512];
+            snprintf(file_path, sizeof(file_path), "files/%d/%s", my_folder_id, filename);
+            
+            FILE *file = fopen(file_path, "rb");
+            if (file) {
+                printf("SERVER: File opened successfully, sending...\n");
+                // Send file in chunks
+                char file_buffer[1024];
+                size_t bytes_read;
+                int total_sent = 0;
+                while ((bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0) {
+                    printf("SERVER: Read %d bytes from file\n", (int)bytes_read);
+                    if (send(client_fd, file_buffer, bytes_read, 0) <= 0) {
+                        printf("SERVER: Send failed!\n");
+                        break; // Connection error
+                    }
+                    total_sent += bytes_read;
+                    printf("SERVER: Sent %d bytes (total: %d)\n", (int)bytes_read, total_sent);
+                }
+                printf("SERVER: Total bytes sent: %d\n", total_sent);
+                fclose(file);
+                printf("File '%s' sent successfully to peer.\n", filename);
+                fflush(stdout);                    // Flush output
+                shutdown(client_fd, SHUT_WR);      // Signal end of data transmission
+                usleep(100000);                    // Wait 100ms for data to be transmitted
+            } else {
+                printf("SERVER: Failed to open file: %s\n", file_path);
+                // Send error message
+                char error_msg[] = "ERROR: File not found";
+                send(client_fd, error_msg, strlen(error_msg), 0);
+            }
+        }
+    }
+    
+    usleep(200000);  // Wait 200ms before closing
+    close(client_fd);
+    return NULL;
+}
+
+// thread of the server to accept port connections
+void* server_thread(void* arg) {
+    int server_fd = port_threads[0].socket_fd;
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    
+    while (1) {
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (client_fd >= 0) {
+            int* client_fd_ptr = (int*)malloc(sizeof(int)); 
+            *client_fd_ptr = client_fd;
+            
+            pthread_t handler_thread;
+            pthread_create(&handler_thread, NULL, client_request, client_fd_ptr);
+            pthread_detach(handler_thread);
+        }
+    }
+    return NULL;
+}
+
+// Simplify the server startup:
+void port_server() {
+    printf("Finding available ports...");
+    fflush(stdout);
+    
+    for (int i = 0; i < MAX_PORTS; i++) {
+        int port = PORTS[i];
+        
+        //if (is_port_available(port)) {
+            int sock = bind_and_listen(port);
+            if (sock >= 0) {
+                my_bound_port = port;
+                
+                // Set up port thread data
+                port_threads[0].port = port;
+                port_threads[0].folder_id = i + 1;
+                port_threads[0].thread_index = 0;
+                port_threads[0].socket_fd = sock;
+                port_threads[0].is_bound = 1;
+                snprintf(port_threads[0].folder_path, sizeof(port_threads[0].folder_path), 
+                         "files/%d", port_threads[0].folder_id);
+                
+                bound_port_count = 1;
+                
+                printf(" Found port %d.\n", port);
+                printf("Listening at port %d.\n", port);
+                
+                // Start server thread to handle peer requests
+                pthread_t server_tid;
+                pthread_create(&server_tid, NULL, server_thread, NULL);
+                pthread_detach(server_tid);
+                
+                return;
+            }
+        //}
+    }
+    
+    printf(" No available ports found.\n");
+}
+
+// P2P File Discovery - connect to other running instances
+void listAvailableFiles() {
+    printf("\nSearching for files... ");
+    
+    // Reset file counter
+    pthread_mutex_lock(&file_list_mutex);
+    unique_file_count = 0;
+    pthread_mutex_unlock(&file_list_mutex);
+    
+    int peers_found = 0;
+    
+    // Try to connect to all other ports
+    for (int i = 0; i < MAX_PORTS; i++) {
+        int port = PORTS[i];
+        if (port != my_bound_port) {
+            printf("\nTrying to connect to port %d... ", port);
+            
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) {
+                printf("socket failed\n");
+                continue;
+            }
+            
+            struct sockaddr_in addr;
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(port);
+            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+            
+            if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                send(sock, "LIST", 4, 0);
+                
+                char buffer[1024];
+                ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
+                if (n > 0) {
+                    buffer[n] = '\0';
+                    printf("connected, found files");
+                    peers_found++;
+                    
+                    char* line = strtok(buffer, "\n");
+                    while (line != NULL) {
+                        char* bracket_end = strchr(line, ']');
+                        if (bracket_end && bracket_end[1] == ' ') {
+                            add_unique_file(bracket_end + 2, port);
+                        }
+                        line = strtok(NULL, "\n");
+                    }
+                } else {
+                    printf("no response\n");
+                }
+            } else {
+                printf("not running");
+            }
+            
+            close(sock);
+        }
+    }
+    
+    printf("\ndone.\n\n");
+    
+    pthread_mutex_lock(&file_list_mutex);
+    if (unique_file_count == 0) {
+        printf("No files found from peer instances.\n");
+        printf("(No other instances appear to be running)\n");
+    } else {
+        printf("Files available.\n");
+        for (int i = 0; i < unique_file_count; i++) {
+            printf("[%d] %s (from port %d)\n", i + 1, unique_files[i].filename, unique_files[i].source_port);
+        }
+        printf("\nFound files from %d running port\n", peers_found);
+    }
+    pthread_mutex_unlock(&file_list_mutex);
+}
+
+// Download a file from a peer
+void download_file() {
+    pthread_mutex_lock(&file_list_mutex);
+    if (unique_file_count == 0) {
+        printf("No files available to download. Please list files first.\n");
+        pthread_mutex_unlock(&file_list_mutex);
+        return;
+    }
+    
+    printf("Available files:\n");
+    for (int i = 0; i < unique_file_count; i++) {
+        printf("[%d] %s (from port %d)\n", i + 1, unique_files[i].filename, unique_files[i].source_port);
+    }
+    printf("\nEnter file number to download (1-%d): ", unique_file_count);
+    
+    int file_choice;
+    scanf("%d", &file_choice);
+    
+    if (file_choice < 1 || file_choice > unique_file_count) {
+        printf("Invalid file number.\n");
+        pthread_mutex_unlock(&file_list_mutex);
+        return;
+    }
+    
+    // Get file info
+    char filename[MAX_FILENAME_LENGTH];
+    int target_port;
+    strcpy(filename, unique_files[file_choice - 1].filename);
+    target_port = unique_files[file_choice - 1].source_port;
+    
+    pthread_mutex_unlock(&file_list_mutex);
+    
+    printf("Downloading '%s' from port %d...\n", filename, target_port);
+    
+    // Connect to the target port
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        printf("Failed to create socket.\n");
+        return;
+    }
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(target_port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        printf("Failed to connect to peer at port %d.\n", target_port);
+        printf("Error: %s\n", strerror(errno)); // Add this line
+        close(sock);
+        return;
+    } else {
+        printf("CLIENT: Successfully connected to port %d\n", target_port); // Add this line
+    }
+    
+    // Send download request
+    char request[512];
+    snprintf(request, sizeof(request), "DOWNLOAD %s", filename);
+    send(sock, request, strlen(request), 0);
+    printf("CLIENT: Sent request: '%s'\n", request); // Add this line
+    
+    // Save to our bound port's directory
+    int my_folder_id = -1;
+    for (int i = 0; i < MAX_PORTS; i++) {
+        if (PORTS[i] == my_bound_port) {
+            my_folder_id = i + 1;
+            break;
+        }
+    }
+    
+    if (my_folder_id == -1) {
+        printf("Error: Could not determine local folder.\n");
+        close(sock);
+        return;
+    }
+    
+    char download_path[512];
+    snprintf(download_path, sizeof(download_path), "files/%d/%s", my_folder_id, filename);
+    
+    FILE *output_file = fopen(download_path, "wb");
+    if (!output_file) {
+        printf("Failed to create output file: %s\n", download_path);
+        close(sock);
+        return;
+    }
+    
+    // Receive file data
+    char buffer[1024];
+    ssize_t bytes_received;
+    int total_bytes = 0;
+    
+    printf("CLIENT: Starting to receive file data...\n");
+    while ((bytes_received = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
+        // Check for error message
+        if (total_bytes == 0 && strncmp(buffer, "ERROR:", 6) == 0) {
+            printf("Server error: %.*s\n", (int)bytes_received, buffer);
+            fclose(output_file);
+            close(sock);
+            remove(download_path); // Delete the empty file
+            return;
+        }
+        
+        fwrite(buffer, 1, bytes_received, output_file);
+        total_bytes += bytes_received;
+        printf("CLIENT: Received %d bytes (total: %d)\n", (int)bytes_received, total_bytes); // ADD THIS
+    }
+    printf("CLIENT: Total bytes received: %d\n", total_bytes);
+    
+    fclose(output_file);
+    close(sock);
+    
+    if (total_bytes > 0) {
+        printf("Download completed! File saved to: %s (%d bytes)\n", download_path, total_bytes);
+        printf("File is now available in your local folder (files/%d/)\n", my_folder_id);
+    } else {
+        printf("Download failed - no data received.\n");
+        remove(download_path); // Delete the empty file
+    }
+}
+
+void show_menu() {
+    int choice;
+    do {
+        printf("\nSeed App\n");
+        printf("[1] List available files.\n");
+        printf("[2] Download file.\n");
+        printf("[3] Download status.\n");
+        printf("[4] Exit.\n");
+        printf("\n ? ");
+
+        scanf("%d", &choice);
+        printf("\n");
+
+        switch (choice) {
+            case 1:
+                listAvailableFiles();
+                break;
+            case 2:
+                download_file();
+                break;
+            case 3:
+                printf("Checking download status...\n");
+                break;
+            case 4:
+                printf("Exiting...\n");
+                break;
+            default:
+                printf("Invalid choice. Please try again.\n");
+        }
+    } while (choice != 4);
+}
+
+int main() {
+    bound_port_count = 0;
+    unique_file_count = 0;
+    my_bound_port = -1;
+    
+    port_server();
+    
+    if (my_bound_port == -1) {
+        printf("Could not bind to any port. Exiting.\n");
+        return 1;
+    }
+    
+    show_menu();
+    
+    // Clean up
+    if (port_threads[0].is_bound && port_threads[0].socket_fd >= 0) {
+        close(port_threads[0].socket_fd);
+    }
+    
+    pthread_mutex_destroy(&bound_ports_mutex);
+    pthread_mutex_destroy(&file_list_mutex);
+    
+    return 0;
+}

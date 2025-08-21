@@ -22,7 +22,7 @@ typedef struct {
     int port;
     int folder_id;
     char folder_path[256];
-    int socket_FileHandle; //for server side, file handling
+    int socket_fd;
     int is_bound;
     pthread_t thread_id;
     int thread_index;
@@ -145,13 +145,13 @@ void get_own_files(char* response, int max_size) {
 
 // Handle port requests (server side)
 void* port_request(void* arg) {
-    int client_filehandle = *(int*)arg; //this will get the client file handle from the argument
-    free(arg); //this will release heap memory in the malloc
+    int client_fd = *(int*)arg;
+    free(arg);
     
-    char buffer[1024]; //buffer to hold the data from the client
-    ssize_t bytes = recv(client_filehandle, buffer, sizeof(buffer) - 1, 0); //waits client to send something
+    char buffer[1024];
+    ssize_t bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
     if (bytes <= 0) {
-        close(client_filehandle);
+        close(client_fd);
         return NULL;
     }
     buffer[bytes] = '\0';
@@ -159,30 +159,27 @@ void* port_request(void* arg) {
     if (strcmp(buffer, "LIST") == 0) {
         char response[2048];
         get_own_files(response, sizeof(response));
-        send(client_filehandle, response, strlen(response), 0); //sending back to client
+        send(client_fd, response, strlen(response), 0);
     }
     
-    close(client_filehandle);
+    close(client_fd);
     return NULL;
 }
 
-// Server thread to accept port connections
+// Server thread to accept peer connections
 void* server_thread(void* arg) {
-    int server_filehandle = port_threads[0].socket_FileHandle; //setting a socket file handle for the server
+    int server_fd = port_threads[0].socket_fd;
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
     
-    while (1) { //loop infinitely
-        int client_filehandle = accept(server_filehandle, (struct sockaddr*)&client_addr, &client_len); // this will wait for other ports
-        if (client_filehandle >= 0) {
-            int* client_filehandle_ptr = (int*)malloc(sizeof(int));  // ths will allocate separate
-            // memory for the clients file handle so each threads has its own copy
-          
-            *client_filehandle_ptr = client_filehandle;
+    while (1) {
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (client_fd >= 0) {
+            int* client_fd_ptr = (int*)malloc(sizeof(int));  // ← Fixed: Added explicit cast
+            *client_fd_ptr = client_fd;
             
-            //this will create a new thread for each client
             pthread_t handler_thread;
-            pthread_create(&handler_thread, NULL, port_request, client_filehandle_ptr); //If new port is bounded, it will create a new thread
+            pthread_create(&handler_thread, NULL, port_request, client_fd_ptr);
             pthread_detach(handler_thread);
         }
     }
@@ -205,7 +202,7 @@ void port_server() {
                 port_threads[0].port = port;
                 port_threads[0].folder_id = i + 1;
                 port_threads[0].thread_index = 0;
-                port_threads[0].socket_FileHandle = sock;
+                port_threads[0].socket_fd = sock;
                 port_threads[0].is_bound = 1;
                 snprintf(port_threads[0].folder_path, sizeof(port_threads[0].folder_path), 
                          "files/%d", port_threads[0].folder_id);
@@ -215,7 +212,7 @@ void port_server() {
                 printf(" Found port %d.\n", port);
                 printf("Listening at port %d.\n", port);
                 
-                // Start server thread to handle port requests
+                // Start server thread to handle peer requests
                 pthread_t server_tid;
                 pthread_create(&server_tid, NULL, server_thread, NULL);
                 pthread_detach(server_tid);
@@ -228,7 +225,7 @@ void port_server() {
     printf(" No available ports found.\n");
 }
 
-// Port2Port File Discovery - connect to other running instances
+// P2P File Discovery - connect to other running instances
 void listAvailableFiles() {
     printf("\nSearching for files... ");
     
@@ -237,7 +234,7 @@ void listAvailableFiles() {
     unique_file_count = 0;
     pthread_mutex_unlock(&file_list_mutex);
     
-    int port_found = 0;
+    int peers_found = 0;
     
     // Try to connect to all other ports
     for (int i = 0; i < MAX_PORTS; i++) {
@@ -245,7 +242,6 @@ void listAvailableFiles() {
         if (port != my_bound_port) {
             printf("Trying to connect to port %d ", port);
             
-            //this will create a socket for the port
             int sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock < 0) {
                 printf("socket failed\n");
@@ -258,14 +254,14 @@ void listAvailableFiles() {
             inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
             
             if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-                send(sock, "LIST", strlen("LIST"), 0);
+                send(sock, "LIST", 4, 0);
                 
                 char buffer[1024];
                 ssize_t n = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (n > 0) {
                     buffer[n] = '\0';
                     printf("connected, found files\n");
-                    port_found++;
+                    peers_found++;
                     
                     // Parse response and add files
                     char* line = strtok(buffer, "\n");
@@ -292,14 +288,14 @@ void listAvailableFiles() {
     // Display results
     pthread_mutex_lock(&file_list_mutex);
     if (unique_file_count == 0) {
-        printf("No files found from port instances.\n");
+        printf("No files found from peer instances.\n");
         printf("(No other instances appear to be running)\n");
     } else {
         printf("Files available.\n");
         for (int i = 0; i < unique_file_count; i++) {
             printf("[%d] %s\n", i + 1, unique_files[i]);
         }
-        printf("\n(Found files from %d running port(s))\n", port_found);
+        printf("\n(Found files from %d running peer(s))\n", peers_found);
     }
     pthread_mutex_unlock(&file_list_mutex);
 }
@@ -353,8 +349,8 @@ int main() {
     show_menu();
     
     // Clean up
-    if (port_threads[0].is_bound && port_threads[0].socket_FileHandle >= 0) {
-        close(port_threads[0].socket_FileHandle);
+    if (port_threads[0].is_bound && port_threads[0].socket_fd >= 0) {
+        close(port_threads[0].socket_fd);
     }
     
     pthread_mutex_destroy(&bound_ports_mutex);
