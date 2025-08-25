@@ -1,0 +1,132 @@
+### Quick defense: know these key download-related functions and their purpose
+
+If your trainer skims and asks "what does this do?", here's what to say for each download function:
+
+**`download_file()` (lines 688-807)**
+- "This is the main entry point. User picks a file, we scan seeds, get exact size, and start the background download thread."
+
+**`download_thread_worker()` (lines 289-306)**
+- "This is the background thread wrapper. It calls the actual downloader and cleans up when done."
+
+**`download_file_round_robin()` (lines 892-1183)**
+- "This is the core download engine. It downloads 32-byte chunks in round-robin fashion across seeds."
+
+**`scan_seeds_for_file()` (lines 809-890)**
+- "This finds which seeds actually have the requested filename by sending LIST to each port."
+
+**`get_file_size_from_seed()` (lines 1260-1300)**
+- "This asks a seed for the exact file size using FILESIZE command, expects SIZE:<bytes> response."
+
+**`check_file_already_exists()` (lines 1211-1258)**
+- "This checks if we already have the file locally with the correct size before starting download."
+
+**`show_download_status()` (lines 1389-1412)**
+- "This shows current download progress from the shared active_download structure."
+
+### Critical download code sections to know by heart:
+
+**1. Chunk size and offset logic (lines 900-905)**
+```900:905:D:\C++\DraftCodes\atonce.cpp
+const int CHUNK_SIZE = 32;  // Fixed 32-byte chunks
+auto total_seeds = available_seeds.size();
+auto current_seed_index = 0;
+```
+- "We use fixed 32-byte chunks and rotate through seeds."
+
+**2. Download request format (lines 986-989)**
+```986:989:D:\C++\DraftCodes\atonce.cpp
+char request[512];
+snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", filename, total_bytes_downloaded);
+send(sock, request, strlen(request), 0);
+```
+- "We send DOWNLOAD filename|offset to request each chunk."
+
+**3. Chunk reading loop (lines 991-1006)**
+```991:1006:D:\C++\DraftCodes\atonce.cpp
+char chunk_buffer[CHUNK_SIZE];
+auto bytes_received = 0;
+auto total_chunk_bytes = 0;
+
+// Read exactly CHUNK_SIZE bytes or until connection closes
+while (total_chunk_bytes < CHUNK_SIZE) {
+    auto bytes = recv(sock, chunk_buffer + total_chunk_bytes, CHUNK_SIZE - total_chunk_bytes, 0);
+    if (bytes <= 0) {
+        break; // Connection closed or error
+    }
+    total_chunk_bytes += bytes;
+}
+```
+- "We read exactly 32 bytes per chunk, handling partial reads."
+
+**4. First chunk handling (lines 1027-1071)**
+```1027:1071:D:\C++\DraftCodes\atonce.cpp
+if (chunk_count == 0) {
+    // Map port to folder ID
+    // Create download directory based on first successful seed
+    // Open output file
+}
+```
+- "First successful chunk determines the save directory and creates the output file."
+
+**5. Safety cap (lines 1113-1117)**
+```1113:1117:D:\C++\DraftCodes\atonce.cpp
+// Safety check: if we've downloaded way more than expected, stop
+if (chunk_count > 10000) { // Prevent infinite loops
+    log_client("Safety limit reached. Stopping download at " + std::to_string(total_bytes_downloaded) + " bytes");
+    break;
+}
+```
+- "Safety cap prevents infinite loops by stopping after 10,000 chunks."
+
+**6. Server-side chunk serving (lines 566-583)**
+```566:583:D:\C++\DraftCodes\atonce.cpp
+// Send one 32-byte chunk from the offset
+char file_buffer[32];
+size_t bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file);
+if (bytes_read > 0) {
+    send(client_filehandle, file_buffer, bytes_read, 0);
+}
+```
+- "Server reads one chunk from the offset and sends it, then closes the connection."
+
+### If asked "why this approach?":
+
+**"We use 32-byte chunks because:**
+- It's small enough to fit in memory buffers
+- Allows round-robin distribution across multiple seeds
+- Makes the server stateless (no connection state needed)
+- Enables easy retry/resume if a chunk fails"
+
+**"We use offsets because:**
+- Each chunk is a new TCP connection
+- Server needs to know where to start reading
+- Enables precise ordering and progress tracking
+- Makes the protocol stateless and resumable"
+
+**"We rotate seeds because:**
+- Distributes load across available sources
+- Provides redundancy if one seed fails
+- Balances bandwidth usage fairly"
+
+### Quick test questions your trainer might ask:
+
+1. **"What happens if a seed goes down during download?"**
+   - "We skip that seed and continue with others. The round-robin continues with remaining active seeds."
+
+2. **"How do you know when the download is complete?"**
+   - "When downloaded bytes >= expected size from FILESIZE, or when all seeds return short chunks (<32 bytes)."
+
+3. **"Why not use larger chunks?"**
+   - "32 bytes keeps memory usage low and allows fine-grained progress tracking. Larger chunks would reduce the number of connections but increase memory per chunk."
+
+4. **"What's the bottleneck in this design?"**
+   - "TCP connection overhead per chunk (32 bytes per connection). For large files, we could increase chunk size or implement connection pooling."
+
+5. **"How do you handle file corruption?"**
+   - "Currently we don't. We could add checksums per chunk or implement retry logic for failed chunks."
+
+### Emergency response if you're stuck:
+
+**"The download works by treating the file as a sequence of 32-byte chunks. For each chunk, we connect to a seed, request the bytes starting at a specific offset, receive up to 32 bytes, write them to disk, then move to the next seed. We track progress and stop when we reach the expected file size or when seeds signal end-of-file. The offset ensures we get the right bytes in the right order across multiple connections."**
+
+This gives you the core concept without diving into specific code details.

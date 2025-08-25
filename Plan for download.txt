@@ -1,0 +1,50 @@
+# Implementation Plan for Distributed File Download
+
+## 1. Update Data Structures
+- **Modify `file_info_t` structure** to track multiple sources:
+  ```c
+  typedef struct {
+      char filename[MAX_FILENAME_LENGTH];
+      int source_ports[MAX_PORTS];  // Array of source ports
+      int source_count;             // Number of sources
+      long file_size;               // File size for chunk calculations
+  } file_info_t;
+  ```
+
+## 2. Update File Discovery
+- **Modify `add_unique_file()`** to add new sources to existing files
+- **Update `listAvailableFiles()`** to display all sources for each file
+
+## 3. Add Server-Side Chunk Support
+- **Add `DOWNLOAD_CHUNK` command** handling in `port_request()`
+- Format: `DOWNLOAD_CHUNK filename offset length`
+- Implement seeking to offset and reading specific chunk lengths
+
+## 4. Create Helper Functions
+- **`get_file_size()`**: Determine file size from any seed
+- **`download_chunk()`**: Download specific chunk from specific seed
+
+## 5. Implement Distributed Download
+- **Create `download_file_distributed()` function**:
+  1. Get file size from first available seed
+  2. Calculate total chunks (32 bytes each)
+  3. Create output file
+  4. Download chunks in round-robin fashion
+  5. Track which seed provided each chunk
+  6. Retry failed chunks with different seeds
+  7. Show progress bar and statistics
+
+## 6. Update Menu
+- Replace `download_file()` with `download_file_distributed()` in menu option 2
+
+## 7. Key Features
+- Round-robin seed selection
+- 32-byte chunks
+- Detailed progress tracking
+- Retry logic for failed chunks
+- Statistics showing which seeds provided which chunks
+
+## 8. Testing Approach
+- Test with multiple running instances
+- Verify chunks are downloaded from different seeds
+- Check file integrity after distributed download

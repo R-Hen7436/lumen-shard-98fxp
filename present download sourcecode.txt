@@ -1,0 +1,95 @@
+### How to present the download source code clearly (with live pointers)
+
+Use this structure: purpose → flow → key functions → critical lines → constraints.
+
+- Explain the goal
+  - “This module discovers seeds, then downloads a chosen file in 32-byte chunks in a background thread, rotating across seeds.”
+
+- Show the entry point: user action → background thread
+  - “When I choose a file, we validate, find seeds, get exact size, and start the background thread.”
+```688:707:D:\C++\DraftCodes\atonce.cpp
+void download_file(){
+    // Check if we have any files to download
+```
+```748:767:D:\C++\DraftCodes\atonce.cpp
+// Get expected file size from one of the seeds
+auto expected_size = get_file_size_from_seed(available_seeds[0], filename);
+```
+```790:807:D:\C++\DraftCodes\atonce.cpp
+// Create background download thread
+if (pthread_create(&active_download.thread_id, NULL, download_thread_worker, &active_download) != 0) {
+```
+
+- Show the worker: delegates to the real downloader and cleans up
+```289:306:D:\C++\DraftCodes\atonce.cpp
+void* download_thread_worker(void* arg) {
+    download_file_round_robin(download_data->filename, *(download_data->available_seeds));
+    // mark inactive
+}
+```
+
+- Show the core: round‑robin downloader and progress
+  - “We fetch 32 bytes per connection, using an offset. First chunk decides where to save.”
+```892:905:D:\C++\DraftCodes\atonce.cpp
+void download_file_round_robin(const char* filename, const std::vector<int>& available_seeds) {
+    const int CHUNK_SIZE = 32;  // Fixed 32-byte chunks
+```
+```933:941:D:\C++\DraftCodes\atonce.cpp
+auto estimated_total_size = get_file_size_from_seed(available_seeds[0], filename);
+// Update global progress tracking
+active_download.total_size = estimated_total_size;
+```
+```986:1006:D:\C++\DraftCodes\atonce.cpp
+snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", filename, total_bytes_downloaded);
+send(sock, request, strlen(request), 0);
+// Receive chunk data - read exactly CHUNK_SIZE bytes
+```
+```1027:1071:D:\C++\DraftCodes\atonce.cpp
+if (chunk_count == 0) {
+    // determine folder; create directory; open output file
+}
+```
+```1073:1117:D:\C++\DraftCodes\atonce.cpp
+fwrite(chunk_buffer, 1, bytes_received, output_file);
+total_bytes_downloaded += bytes_received;
+// stop when >= estimated size or safety cap
+```
+
+- Show the seed/server side: how a chunk is served
+  - “Server is stateless; it seeks and sends a single chunk per request.”
+```489:506:D:\C++\DraftCodes\atonce.cpp
+else if (strncmp(buffer, "DOWNLOAD ", 9) == 0) {
+    // Parse DOWNLOAD command - format: "DOWNLOAD filename offset"
+```
+```563:583:D:\C++\DraftCodes\atonce.cpp
+// Send one 32-byte chunk from the offset
+char file_buffer[32];
+size_t bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file);
+send(client_filehandle, file_buffer, bytes_read, 0);
+```
+- And the exact size probe:
+```437:479:D:\C++\DraftCodes\atonce.cpp
+else if (strncmp(buffer, "FILESIZE ", 9) == 0) {
+    // ... Responding with SIZE:<bytes>
+}
+```
+```1260:1294:D:\C++\DraftCodes\atonce.cpp
+long long get_file_size_from_seed(int port, const char* filename) {
+    // send "FILESIZE <filename>", expect "SIZE:<bytes>"
+}
+```
+
+- Call out why the offset exists
+  - “Because each chunk is a fresh TCP connection, the client must say where to start. We pass offset; the server fseeks there and sends up to 32 bytes. This enables round‑robin, retries, and resumability.”
+
+- Key constraints you should state
+  - “One active download at a time.”
+  - “Seeds must be running locally and serving the file under the expected path.”
+  - “Protocol strings must match exactly: LIST, FILESIZE → SIZE:<bytes>, DOWNLOAD <filename>|<offset>.”
+  - “Safety cap stops after 10,000 chunks (~320 KB at 32B chunks) unless raised.”
+  - “Final log currently shows 100% of downloaded/downloaded, not downloaded/expected.”
+
+- One-paragraph narrative you can say while showing the code
+  - “We start in download_file(), find seeds and exact file size, then spawn a background thread. The worker calls download_file_round_robin(), which loops over seeds, connecting for each 32‑byte chunk. It sends DOWNLOAD with the current byte offset, receives up to 32 bytes, writes them sequentially, and rotates to the next seed. The first successful chunk determines the save path, we track totals for status, and we stop at the expected size, EOF, or the safety cap. On the server side, port_request() handles FILESIZE and DOWNLOAD: it seeks to the given offset and returns one chunk per connection, which keeps the server stateless and makes retries simple.”
+
+If you’d like, I can generate a short PDF-style handout from these talking points with the exact code refs you plan to show.

@@ -1,0 +1,115 @@
+### Download-related code: what each piece does
+
+- **User initiates a download**
+  - `download_file()` validates selection, finds seeds, fetches size, and starts a background thread.
+```688:807:D:\C++\DraftCodes\atonce.cpp
+// ... picks filename, scans seeds ...
+auto expected_size = get_file_size_from_seed(available_seeds[0], filename);
+// ... ensures no active download ...
+if (pthread_create(&active_download.thread_id, NULL, download_thread_worker, &active_download) != 0) {
+    // error
+}
+pthread_detach(active_download.thread_id);
+```
+
+- **Background worker**
+  - `download_thread_worker()` just logs and calls the real downloader, then cleans up.
+```289:306:D:\C++\DraftCodes\atonce.cpp
+void* download_thread_worker(void* arg) {
+    download_thread_data_t* download_data = (download_thread_data_t*)arg;
+    download_file_round_robin(download_data->filename, *(download_data->available_seeds));
+    // cleanup and mark inactive
+    return NULL;
+}
+```
+
+- **Round-robin downloader**
+  - `download_file_round_robin()` connects to seeds in turn and requests one 32-byte chunk per connection using an ever-increasing offset.
+  - The first successful chunk defines the local save path.
+  - Updates `active_download` for status; stops on EOF/expected size/safety cap.
+```892:951:D:\C++\DraftCodes\atonce.cpp
+const int CHUNK_SIZE = 32;
+auto estimated_total_size = get_file_size_from_seed(available_seeds[0], filename);
+pthread_mutex_lock(&download_thread_mutex);
+active_download.total_size = estimated_total_size;
+active_download.total_chunks = (estimated_total_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+pthread_mutex_unlock(&download_thread_mutex);
+```
+
+```986:1006:D:\C++\DraftCodes\atonce.cpp
+snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", filename, total_bytes_downloaded);
+send(sock, request, strlen(request), 0);
+// recv up to 32 bytes
+while (total_chunk_bytes < CHUNK_SIZE) {
+    auto bytes = recv(sock, chunk_buffer + total_chunk_bytes, CHUNK_SIZE - total_chunk_bytes, 0);
+    if (bytes <= 0) break;
+    total_chunk_bytes += bytes;
+}
+```
+
+```1027:1071:D:\C++\DraftCodes\atonce.cpp
+if (chunk_count == 0) {
+    // map seed port -> source folder id
+    // create download dir files/seed<my>/<my>/<source-id>
+    // open output file
+}
+```
+
+```1073:1117:D:\C++\DraftCodes\atonce.cpp
+fwrite(chunk_buffer, 1, bytes_received, output_file);
+total_bytes_downloaded += bytes_received;
+chunk_count++;
+// EOF from seed if < 32 bytes
+if (bytes_received < CHUNK_SIZE) {
+    seed_finished[current_seed_index] = true;
+    // decrement active seeds; maybe stop
+}
+// stop when >= estimated_total_size
+if (total_bytes_downloaded >= estimated_total_size) break;
+// safety cap (prevents infinite loop)
+if (chunk_count > 10000) {
+    log_client("Safety limit reached. Stopping download at " + std::to_string(total_bytes_downloaded) + " bytes");
+    break;
+}
+```
+
+```1145:1172:D:\C++\DraftCodes\atonce.cpp
+if (output_file) fclose(output_file);
+// final logging of bytes/chunks/path and distribution
+```
+
+- **Finding seeds with the file**
+  - `scan_seeds_for_file()` checks each port with `LIST` and records which ports have an exact filename match.
+```809:889:D:\C++\DraftCodes\atonce.cpp
+// connects to each port (except self), sends LIST, parses lines "[n] <filename>"
+// if matches filename, add to available_seeds
+```
+
+- **Getting the exact file size (for progress and stopping)**
+  - `get_file_size_from_seed()` asks one seed for `FILESIZE <filename>` and expects `SIZE:<bytes>`.
+```1260:1300:D:\C++\DraftCodes\atonce.cpp
+snprintf(request, sizeof(request), "FILESIZE %s", filename);
+send(sock, request, strlen(request), 0);
+auto bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+if (strncmp(buffer, "SIZE:", 5) == 0) return atoll(buffer + 5);
+```
+
+- **Server side of file transfer**
+  - `port_request()` handles `FILESIZE` and `DOWNLOAD <filename>|<offset>`.
+  - For `DOWNLOAD`, it seeks to `offset` and sends up to 32 bytes, then closes. The client reconnects for the next chunk.
+```489:606:D:\C++\DraftCodes\atonce.cpp
+// parse filename and offset
+// open file, fseek(file, offset, SEEK_SET)
+// read once: char file_buffer[32]; size_t bytes_read = fread(...);
+// send(...) the bytes, then close
+```
+
+### What’s essential for it to work
+
+- The seeds must be running and serve files under `files/seed<id>/<id>/`.
+- `FILESIZE` must return the exact size as `SIZE:<bytes>`.
+- Each `DOWNLOAD <filename>|<offset>` request must return at most 32 bytes, then close.
+- Filenames must match exactly between `LIST` results and the requested name.
+- The first received chunk must successfully create the save path `files/seed<my>/<my>/<source-id>/`.
+- Only one active download at a time (`active_download.is_active` guard).
+- Be aware of the safety cap at 10,000 chunks (~320 KB at 32 bytes/chunk) if downloading large files.

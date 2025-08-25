@@ -23,9 +23,6 @@ const int MAX_PORTS = 5;
 const int MAX_FILES = 100;
 const int MAX_FILENAME_LENGTH = 256;
 
-// Download configuration
-const int CHUNK_DELAY_MICROSECONDS = 5000; // 100ms delay between chunks
-
 //global variables
 typedef struct {
     int port;
@@ -66,10 +63,6 @@ typedef struct {
     std::vector<int>* available_seeds;
     pthread_t thread_id;
     bool is_active;
-    long long total_size;
-    long long downloaded_bytes;
-    int total_chunks;
-    int completed_chunks;
 } download_thread_data_t;
 
 // Global download thread management
@@ -84,7 +77,6 @@ void log_server(const std::string& message);
 void close_client_logging();
 void close_server_logging();
 std::string get_timestamp();
-std::string format_file_size(long long bytes);
 void* download_thread_worker(void* arg);
 void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds);
 void download_file_round_robin(const char* filename, const std::vector<int>& available_seeds);
@@ -148,26 +140,6 @@ std::string get_timestamp() {
     return std::string(buffer);
 }
 
-std::string format_file_size(long long bytes) {
-    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-    int unit_index = 0;
-    double size = bytes;
-    
-    while (size >= 1024.0 && unit_index < 4) {
-        size /= 1024.0;
-        unit_index++;
-    }
-    
-    char buffer[32];
-    if (unit_index == 0) {
-        snprintf(buffer, sizeof(buffer), "%lld%s", (long long)size, units[unit_index]);
-    } else {
-        snprintf(buffer, sizeof(buffer), "%.1f%s", size, units[unit_index]);
-    }
-    
-    return std::string(buffer);
-}
-
 void init_client_logging() {
     if (client_logging_active) return; // Already initialized
     
@@ -189,6 +161,7 @@ void init_client_logging() {
         client_log_file << "[" << timestamp_str << "] Client bound to port: " << my_bound_port << std::endl;
         client_log_file.flush();
         
+        std::cout << "Download logging started: " << client_log_filename << std::endl;
     }
     pthread_mutex_unlock(&client_log_mutex);
 }
@@ -214,6 +187,7 @@ void init_server_logging() {
         server_log_file << "[" << timestamp_str << "] Server listening on port: " << my_bound_port << std::endl;
         server_log_file.flush();
         
+        std::cout << "Server logging started: " << server_log_filename << std::endl;
     }
     pthread_mutex_unlock(&server_log_mutex);
 }
@@ -265,6 +239,7 @@ void close_client_logging() {
         client_log_file << "[" << timestamp << "] === DOWNLOAD SESSION ENDED ===" << std::endl;
         client_log_file.close();
         client_logging_active = false;
+        std::cout << "Download logging ended: " << client_log_filename << std::endl;
     }
     pthread_mutex_unlock(&client_log_mutex);
 }
@@ -781,12 +756,6 @@ void download_file(){
      active_download.available_seeds = new std::vector<int>(available_seeds);
      active_download.is_active = true;
      
-     // Initialize progress tracking
-     active_download.total_size = 0;
-     active_download.downloaded_bytes = 0;
-     active_download.total_chunks = 0;
-     active_download.completed_chunks = 0;
-     
      // Create background download thread
      if (pthread_create(&active_download.thread_id, NULL, download_thread_worker, &active_download) != 0) {
          std::cout << "Error: Failed to create download thread" << std::endl;
@@ -932,14 +901,6 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
     auto chunk_count = 0;
     auto estimated_total_size = get_file_size_from_seed(available_seeds[0], filename);
     
-    // Update global progress tracking
-    pthread_mutex_lock(&download_thread_mutex);
-    if (active_download.is_active) {
-        active_download.total_size = estimated_total_size;
-        active_download.total_chunks = (estimated_total_size + CHUNK_SIZE - 1) / CHUNK_SIZE; // Round up
-    }
-    pthread_mutex_unlock(&download_thread_mutex);
-    
     if (estimated_total_size <= 0) {
         estimated_total_size = CHUNK_SIZE * 100; // Fallback estimate
         log_client("Using fallback file size estimate: " + std::to_string(estimated_total_size) + " bytes");
@@ -1075,14 +1036,6 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
             total_bytes_downloaded += bytes_received;
             chunk_count++;
             
-            // Update global progress tracking
-            pthread_mutex_lock(&download_thread_mutex);
-            if (active_download.is_active) {
-                active_download.downloaded_bytes = total_bytes_downloaded;
-                active_download.completed_chunks = chunk_count;
-            }
-            pthread_mutex_unlock(&download_thread_mutex);
-            
             // Reset consecutive failures since we got data
             static int consecutive_failures = 0;
             consecutive_failures = 0;
@@ -1136,10 +1089,6 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
         
         // Move to next seed in round-robin fashion
         current_seed_index = (current_seed_index + 1) % total_seeds;
-        
-        // Add delay between chunks for better progress monitoring
-        // This simulates realistic network conditions and allows for status updates
-        usleep(CHUNK_DELAY_MICROSECONDS);
     }
     
     if (output_file) {
@@ -1386,31 +1335,6 @@ void listAvailableFiles() {
     pthread_mutex_unlock(&file_list_mutex);
 }
 
-void show_download_status() {
-    std::cout << "\nDownload status:" << std::endl;
-    
-    pthread_mutex_lock(&download_thread_mutex);
-    if (active_download.is_active) {
-        // Calculate percentage
-        double percentage = 0.0;
-        if (active_download.total_size > 0) {
-            percentage = (double)active_download.downloaded_bytes / active_download.total_size * 100.0;
-        }
-        
-        // Format sizes
-        std::string downloaded_str = format_file_size(active_download.downloaded_bytes);
-        std::string total_str = format_file_size(active_download.total_size);
-        
-        // Display progress
-        std::cout << "[1] " << active_download.filename << "  " 
-                  << downloaded_str << "/" << total_str 
-                  << " (" << std::fixed << std::setprecision(2) << percentage << "%)" << std::endl;
-    } else {
-        std::cout << "No active downloads." << std::endl;
-    }
-    pthread_mutex_unlock(&download_thread_mutex);
-}
-
 void show_menu() {
     auto choice = 0;
     do {
@@ -1432,7 +1356,15 @@ void show_menu() {
                 download_file();
                 break;
             case 3:
-                show_download_status();
+                // Check download status
+                pthread_mutex_lock(&download_thread_mutex);
+                if (active_download.is_active) {
+                    std::cout << "Download in progress: " << active_download.filename << std::endl;
+                    std::cout << "Check the log file for detailed progress." << std::endl;
+                } else {
+                    std::cout << "No active downloads." << std::endl;
+                }
+                pthread_mutex_unlock(&download_thread_mutex);
                 break;
             case 4:
                 std::cout << "Exiting..." << std::endl;
@@ -1451,10 +1383,6 @@ int main() {
     // Initialize download thread data
     active_download.is_active = false;
     active_download.available_seeds = nullptr;
-    active_download.total_size = 0;
-    active_download.downloaded_bytes = 0;
-    active_download.total_chunks = 0;
-    active_download.completed_chunks = 0;
     
     // Start single port server
     port_server();

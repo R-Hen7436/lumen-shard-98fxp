@@ -1,0 +1,73 @@
+### How the download feature works (end-to-end)
+
+- **Discovery**
+  - `listAvailableFiles()` asks each other port for `LIST` and deduplicates into `unique_files`.
+  - `download_file()` lets you pick a file, then `scan_seeds_for_file()` checks which ports actually have that filename.
+
+- **Size probe**
+  - `get_file_size_from_seed(port, filename)` sends `FILESIZE <filename>`.
+  - Expects exact response: `SIZE:<bytes>`. This drives progress and stop conditions.
+
+- **Starting the download**
+  - `download_file()` ensures no active download, then spawns `download_thread_worker()` with `active_download` populated.
+
+- **Round‑robin chunking**
+  - `download_thread_worker()` → `download_file_round_robin(filename, available_seeds)`.
+  - Iterates seeds in a loop, one 32‑byte chunk at a time:
+    - Connects to a seed, sends `DOWNLOAD <filename>|<offset>`.
+    - Reads up to 32 bytes and appends to the output file.
+    - Moves to the next seed, slight delay (5ms), repeat.
+  - The first successful chunk decides where to save:
+    - `files/seed<my>/<my>/<first-source-id>/<filename>`
+
+- **Server side behavior**
+  - On `DOWNLOAD <filename>|<offset>`, the server opens the file, seeks to `offset`, sends one chunk (up to 32 bytes), and closes the connection.
+  - On `FILESIZE`, it returns the exact byte size.
+
+- **Completion conditions**
+  - Stops when:
+    - Downloaded bytes ≥ `estimated_total_size`, or
+    - All seeds report EOF (send < 32 bytes), or
+    - Safety cap: more than 10,000 chunks (≈ 320,000 bytes with 32‑byte chunks).
+
+### Critical things that must be true (or it won’t work)
+
+- **Seeds must be running locally**
+  - The client connects to `127.0.0.1` ports `8080–8084`. Other instances must be started and bound to those ports.
+
+- **Files must be in the expected directories**
+  - Each seed serves from `files/seed<id>/<id>/`. The filename in `LIST` must exactly match the requested name.
+
+- **Protocol strings must match**
+  - Client expects precise responses:
+    - `LIST` → newline list with `[n] <filename>`
+    - `FILESIZE <filename>` → `SIZE:<bytes>`
+    - `DOWNLOAD <filename>|<offset>` → up to 32 raw bytes (or an error string starting with `ERROR:`)
+  - Any deviation breaks parsing or flow.
+
+- **Single active download**
+  - Guarded by `active_download.is_active`. A second download won’t start until the first ends.
+
+- **Directory creation must succeed**
+  - `create_directory(download_dir)` must be able to create `files/seed<my>/<my>/<source-id>/`. Lack of permissions or path issues will fail the write.
+
+- **Consistent chunk size assumption**
+  - Client assumes the server sends at most 32 bytes per request and treats a short read (<32) as EOF for that seed. If the server sends more or frames differently, logic breaks.
+
+- **Correct file size**
+  - `FILESIZE` must return the true size. If it’s wrong or missing, the client falls back to a guess and may stop early or hit the safety cap.
+
+- **Safety cap awareness**
+  - Current cap: `chunk_count > 10000` stops the download, which limits size to ~320 KB. For large files, this must be raised or removed.
+
+### Most important notes
+
+- **One-connection-per-chunk design**: Each 32‑byte chunk is a separate TCP connection. This is unusual but intended here; both client and server are coded for it.
+- **Exact filename matching**: The listing and the download must use the same string (no extra spaces/newlines).
+- **Local-only networking**: Everything is hardcoded to `127.0.0.1`. Remote machines won’t work without changing the address.
+- **Progress logs can mislead**: The final “100%” log is “downloaded/downloaded” not “downloaded/expected”. If it stops early (safety cap), it can still log 100%.
+
+If you want, I can:
+- Remove/raise the safety cap and make “100%” compare to `estimated_total_size`.
+- Increase chunk size to reduce connections.
+- Add clear error logs when protocol responses don’t match expectations.

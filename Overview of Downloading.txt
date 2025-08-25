@@ -1,0 +1,107 @@
+### Overview: how downloading works in `atonce.cpp`
+
+- **You choose a file** in the menu → `download_file()` validates the choice, finds which seeds have it, fetches the exact size, and starts a background thread.
+
+```688:807:D:\C++\DraftCodes\atonce.cpp
+// ... validate, scan seeds ...
+auto expected_size = get_file_size_from_seed(available_seeds[0], filename);
+// guard: only one active download
+pthread_create(&active_download.thread_id, NULL, download_thread_worker, &active_download);
+pthread_detach(active_download.thread_id);
+```
+
+- **Background thread runs the downloader** → `download_thread_worker()` delegates to the round‑robin downloader and marks the download inactive when finished.
+
+```289:306:D:\C++\DraftCodes\atonce.cpp
+void* download_thread_worker(void* arg) {
+  download_file_round_robin(download_data->filename, *(download_data->available_seeds));
+  // cleanup and mark inactive
+  return NULL;
+}
+```
+
+- **Round‑robin chunk download** → `download_file_round_robin()`:
+  - Uses fixed 32‑byte chunks.
+  - Rotates across seeds; each chunk is fetched via a fresh TCP connection with an increasing offset.
+  - First successful chunk decides the local save directory and creates the output file.
+  - Updates shared progress (`active_download`) for the status menu.
+
+```892:951:D:\C++\DraftCodes\atonce.cpp
+const int CHUNK_SIZE = 32;
+auto estimated_total_size = get_file_size_from_seed(available_seeds[0], filename);
+pthread_mutex_lock(&download_thread_mutex);
+active_download.total_size = estimated_total_size;
+active_download.total_chunks = (estimated_total_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+pthread_mutex_unlock(&download_thread_mutex);
+```
+
+- **Per‑chunk request/receive/write**:
+  - Connect to a seed, request the next chunk by offset:
+    - Request: `DOWNLOAD <filename>|<offset>`
+    - Read up to 32 bytes; write them to the output file; rotate to next seed.
+
+```986:1006:D:\C++\DraftCodes\atonce.cpp
+snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", filename, total_bytes_downloaded);
+send(sock, request, strlen(request), 0);
+// read up to 32 bytes
+while (total_chunk_bytes < CHUNK_SIZE) {
+  auto bytes = recv(sock, chunk_buffer + total_chunk_bytes, CHUNK_SIZE - total_chunk_bytes, 0);
+  if (bytes <= 0) break;
+  total_chunk_bytes += bytes;
+}
+```
+
+- **First chunk decides save path**:
+  - Path: `files/seed<my>/<my>/<first-source-id>/<filename>`
+
+```1027:1071:D:\C++\DraftCodes\atonce.cpp
+if (chunk_count == 0) {
+  // map seed port → folder id; create directory; open output file
+}
+```
+
+- **Write, advance, and stop conditions**:
+  - Write chunk, increment totals, and stop when:
+    - Downloaded bytes ≥ expected size, or
+    - A seed returns a short chunk (<32) indicating EOF and all seeds are finished, or
+    - Safety cap triggers (more than 10,000 chunks).
+
+```1073:1117:D:\C++\DraftCodes\atonce.cpp
+fwrite(chunk_buffer, 1, bytes_received, output_file);
+total_bytes_downloaded += bytes_received;
+chunk_count++;
+if (bytes_received < CHUNK_SIZE) { /* seed finished */ }
+if (total_bytes_downloaded >= estimated_total_size) break;
+if (chunk_count > 10000) { log_client("Safety limit reached..."); break; }
+```
+
+- **Finalization and logs**:
+  - Close file, log totals, path, and per‑seed chunk distribution.
+
+```1145:1172:D:\C++\DraftCodes\atonce.cpp
+if (output_file) fclose(output_file);
+log_client("Total bytes downloaded: " + std::to_string(total_bytes_downloaded));
+// per-seed distribution
+```
+
+### The server side protocol (what seeds do)
+
+- Handles three commands in `port_request()`:
+  - `LIST` → returns own directory listing.
+  - `FILESIZE <filename>` → returns `SIZE:<bytes>`.
+  - `DOWNLOAD <filename>|<offset>` → seeks to offset and sends one chunk (up to 32 bytes), then closes.
+
+```489:606:D:\C++\DraftCodes\atonce.cpp
+// parse filename and offset
+// fseek(file, offset); read once into 32-byte buffer; send; close
+```
+
+### Absolutely essential for it to work
+
+- Seeds are running on 127.0.0.1 ports in `PORTS` and have the file under `files/seed<id>/<id>/`.
+- `FILESIZE` responds with correct `SIZE:<bytes>` so the client knows when to stop.
+- The server sends at most 32 bytes per `DOWNLOAD` request and closes; the client relies on this framing.
+- Exact filename match between `LIST` output and the requested name.
+- The first chunk can create the download directory and open the output file successfully.
+- Only one active download at a time is enforced.
+- For large files, the safety cap (`chunk_count > 10000`) must be raised/removed; otherwise it stops early.

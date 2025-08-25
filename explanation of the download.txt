@@ -1,0 +1,70 @@
+### Short talk track (2–3 minutes)
+
+- The app runs as both a seed server and a client. It binds to one local port and also connects to the other ports to find and download files.
+- You pick a file from a discovered list. The app finds which seeds have it and asks one seed for the exact byte size.
+- A background download thread starts. It downloads the file in tiny, fixed 32‑byte chunks.
+- Each chunk is fetched over a fresh TCP connection. The client tells the seed where to start by sending the current byte offset. The seed seeks to that offset, sends up to 32 bytes, and closes the connection.
+- The client rotates across available seeds (round‑robin), writing each chunk to disk in order, and tracks progress against the known file size.
+- The download stops when the expected size is reached, seeds report EOF, or a safety cap is hit.
+- Files are saved under `files/seed<my>/<my>/<source-id>/<filename>`. Logs are written for traceability.
+
+### What the feature does (in plain terms)
+
+- Discovers files available on sibling seed instances running on local ports.
+- Downloads a selected file by requesting small chunks in order, switching between seeds for fairness and resilience.
+- Keeps downloads stateless and resumable per chunk using byte offsets.
+- Tracks progress and writes structured logs (client and server sides).
+
+### Step-by-step flow
+
+1. You choose “Download file” → `download_file()`
+   - Confirms a valid selection from `unique_files`.
+   - Calls `scan_seeds_for_file()` to find which ports actually have the filename.
+   - Calls `get_file_size_from_seed()` to get `SIZE:<bytes>` for progress/stop logic.
+   - Starts `download_thread_worker()` in the background.
+
+2. Background download → `download_file_round_robin()`
+   - Chunk size: 32 bytes.
+   - For offset = 0, 32, 64, …:
+     - Pick next seed in round‑robin.
+     - Connect and send `DOWNLOAD <filename>|<offset>`.
+     - Read up to 32 bytes and append to the output file.
+     - If first successful chunk: create download directory and open file.
+   - Stop when:
+     - Downloaded bytes ≥ expected size, or
+     - Seed returns a short chunk (<32 bytes) and all seeds are finished, or
+     - Safety cap triggers (more than 10,000 chunks).
+
+3. Server behavior per request → `port_request()`
+   - `LIST` → returns its files.
+   - `FILESIZE <filename>` → returns exact size as `SIZE:<bytes>`.
+   - `DOWNLOAD <filename>|<offset>` → `fseek(offset)` and send up to one 32‑byte chunk.
+
+### Why the offset matters
+
+- Tells a stateless server exactly which bytes to send next.
+- Enables round‑robin across multiple seeds while keeping order.
+- Supports retry/resume without server-side state.
+
+### Key constraints to mention
+
+- Local-only network: connects to `127.0.0.1` on ports `8080–8084`.
+- One active download at a time (guarded by `active_download.is_active`).
+- Server sends one chunk per connection by design.
+- Safety cap: 10,000 chunks → ~320 KB max with current 32‑byte chunks. Increase/remove for large files.
+- The final “100%” log reports downloaded/downloaded, not downloaded/expected. Could look complete even if stopped early by the cap.
+
+### Where things land and how it’s logged
+
+- Save path: `files/seed<my>/<my>/<first-source-id>/<filename>`.
+- Client logs: `download_file_<timestamp>_port<myport>.log` (progress, totals, path).
+- Server logs: `seedapp_port<myport>_log_<timestamp>.txt` (requests served).
+
+### Quick demo script you can say
+
+- “I open the app; it binds to an available port and starts a seed server.”
+- “I list files; the client queries other ports with LIST and builds a deduplicated list.”
+- “I pick a file; we confirm which seeds have it and fetch the exact file size.”
+- “A background thread begins downloading in 32‑byte chunks. For each chunk, we connect to a seed, send the current offset, receive up to 32 bytes, write them, then rotate to the next seed.”
+- “We repeat until we reach the known file size or seeds signal EOF. We save under my seed’s folder, nested by the first seed we pulled from, and log the entire process.”
+- “Note: there’s a safety cap for 10k chunks; for large files, we lift this. Also the completion log reports 100% of what we downloaded, so we compare to expected size to confirm full completion.”

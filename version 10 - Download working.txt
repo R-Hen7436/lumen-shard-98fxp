@@ -14,17 +14,12 @@
 #include <errno.h>     // For errno
 #include <vector> // Added for scan_seeds_for_file
 #include <iomanip> // Added for setprecision
-#include <fstream> // For file logging
-#include <sstream> // For string stream operations
 
 // Port configuration - easily changeable
 const int PORTS[] = {8080, 8081, 8082, 8083, 8084};
 const int MAX_PORTS = 5;
 const int MAX_FILES = 100;
 const int MAX_FILENAME_LENGTH = 256;
-
-// Download configuration
-const int CHUNK_DELAY_MICROSECONDS = 5000; // 100ms delay between chunks
 
 //global variables
 typedef struct {
@@ -50,42 +45,7 @@ int my_bound_port = -1;
 
 pthread_mutex_t file_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Logging system
-std::ofstream client_log_file;
-std::ofstream server_log_file;
-pthread_mutex_t client_log_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t server_log_mutex = PTHREAD_MUTEX_INITIALIZER;
-std::string client_log_filename;
-std::string server_log_filename;
-bool client_logging_active = false;
-bool server_logging_active = false;
-
-// Download thread data structure
-typedef struct {
-    char filename[MAX_FILENAME_LENGTH];
-    std::vector<int>* available_seeds;
-    pthread_t thread_id;
-    bool is_active;
-    long long total_size;
-    long long downloaded_bytes;
-    int total_chunks;
-    int completed_chunks;
-} download_thread_data_t;
-
-// Global download thread management
-download_thread_data_t active_download;
-pthread_mutex_t download_thread_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 // Function prototypes
-void init_client_logging();
-void init_server_logging();
-void log_client(const std::string& message);
-void log_server(const std::string& message);
-void close_client_logging();
-void close_server_logging();
-std::string get_timestamp();
-std::string format_file_size(long long bytes);
-void* download_thread_worker(void* arg);
 void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds);
 void download_file_round_robin(const char* filename, const std::vector<int>& available_seeds);
 void show_progress_bar(long long current, long long total, int bar_width = 50);
@@ -137,172 +97,6 @@ int create_directory(const char* path) {
     }
     
     return 0;
-}
-
-// Logging system implementation
-std::string get_timestamp() {
-    time_t now = time(0);
-    struct tm* timeinfo = localtime(&now);
-    char buffer[80];
-    strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", timeinfo);
-    return std::string(buffer);
-}
-
-std::string format_file_size(long long bytes) {
-    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-    int unit_index = 0;
-    double size = bytes;
-    
-    while (size >= 1024.0 && unit_index < 4) {
-        size /= 1024.0;
-        unit_index++;
-    }
-    
-    char buffer[32];
-    if (unit_index == 0) {
-        snprintf(buffer, sizeof(buffer), "%lld%s", (long long)size, units[unit_index]);
-    } else {
-        snprintf(buffer, sizeof(buffer), "%.1f%s", size, units[unit_index]);
-    }
-    
-    return std::string(buffer);
-}
-
-void init_client_logging() {
-    if (client_logging_active) return; // Already initialized
-    
-    std::string timestamp = get_timestamp();
-    client_log_filename = "download_file_" + get_timestamp() + "_port" + std::to_string(my_bound_port) + ".log";
-    
-    pthread_mutex_lock(&client_log_mutex);
-    client_log_file.open(client_log_filename, std::ios::out | std::ios::app);
-    
-    if (client_log_file.is_open()) {
-        client_logging_active = true;
-        
-        time_t now = time(0);
-        struct tm* timeinfo = localtime(&now);
-        char timestamp_str[80];
-        strftime(timestamp_str, sizeof(timestamp_str), "%Y-%m-%d %H:%M:%S", timeinfo);
-        
-        client_log_file << "[" << timestamp_str << "] === DOWNLOAD SESSION STARTED ===" << std::endl;
-        client_log_file << "[" << timestamp_str << "] Client bound to port: " << my_bound_port << std::endl;
-        client_log_file.flush();
-        
-    }
-    pthread_mutex_unlock(&client_log_mutex);
-}
-
-void init_server_logging() {
-    if (server_logging_active) return; // Already initialized
-    
-    std::string timestamp = get_timestamp();
-    server_log_filename = "seedapp_port" + std::to_string(my_bound_port) + "_log_" + timestamp + ".txt";
-    
-    pthread_mutex_lock(&server_log_mutex);
-    server_log_file.open(server_log_filename, std::ios::out | std::ios::app);
-    
-    if (server_log_file.is_open()) {
-        server_logging_active = true;
-        
-        time_t now = time(0);
-        struct tm* timeinfo = localtime(&now);
-        char timestamp_str[80];
-        strftime(timestamp_str, sizeof(timestamp_str), "%Y-%m-%d %H:%M:%S", timeinfo);
-        
-        server_log_file << "[" << timestamp_str << "] === SEED SERVER LOG STARTED ===" << std::endl;
-        server_log_file << "[" << timestamp_str << "] Server listening on port: " << my_bound_port << std::endl;
-        server_log_file.flush();
-        
-    }
-    pthread_mutex_unlock(&server_log_mutex);
-}
-
-void log_client(const std::string& message) {
-    if (!client_logging_active) {
-        init_client_logging();
-    }
-    
-    pthread_mutex_lock(&client_log_mutex);
-    if (client_log_file.is_open()) {
-        time_t now = time(0);
-        struct tm* timeinfo = localtime(&now);
-        char timestamp[80];
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
-        
-        client_log_file << "[" << timestamp << "] " << message << std::endl;
-        client_log_file.flush();
-    }
-    pthread_mutex_unlock(&client_log_mutex);
-}
-
-void log_server(const std::string& message) {
-    if (!server_logging_active) {
-        init_server_logging();
-    }
-    
-    pthread_mutex_lock(&server_log_mutex);
-    if (server_log_file.is_open()) {
-        time_t now = time(0);
-        struct tm* timeinfo = localtime(&now);
-        char timestamp[80];
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
-        
-        server_log_file << "[" << timestamp << "] " << message << std::endl;
-        server_log_file.flush();
-    }
-    pthread_mutex_unlock(&server_log_mutex);
-}
-
-void close_client_logging() {
-    pthread_mutex_lock(&client_log_mutex);
-    if (client_log_file.is_open() && client_logging_active) {
-        time_t now = time(0);
-        struct tm* timeinfo = localtime(&now);
-        char timestamp[80];
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
-        
-        client_log_file << "[" << timestamp << "] === DOWNLOAD SESSION ENDED ===" << std::endl;
-        client_log_file.close();
-        client_logging_active = false;
-    }
-    pthread_mutex_unlock(&client_log_mutex);
-}
-
-void close_server_logging() {
-    pthread_mutex_lock(&server_log_mutex);
-    if (server_log_file.is_open() && server_logging_active) {
-        time_t now = time(0);
-        struct tm* timeinfo = localtime(&now);
-        char timestamp[80];
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
-        
-        server_log_file << "[" << timestamp << "] === SEED SERVER LOG ENDED ===" << std::endl;
-        server_log_file.close();
-        server_logging_active = false;
-        std::cout << "Server logging ended: " << server_log_filename << std::endl;
-    }
-    pthread_mutex_unlock(&server_log_mutex);
-}
-
-// Download thread worker function
-void* download_thread_worker(void* arg) {
-    download_thread_data_t* download_data = (download_thread_data_t*)arg;
-    
-    log_client("Background download thread started for file: " + std::string(download_data->filename));
-    
-    // Perform the actual download
-    download_file_round_robin(download_data->filename, *(download_data->available_seeds));
-    
-    // Clean up
-    pthread_mutex_lock(&download_thread_mutex);
-    delete download_data->available_seeds;
-    download_data->is_active = false;
-    pthread_mutex_unlock(&download_thread_mutex);
-    
-    log_client("Background download thread completed for file: " + std::string(download_data->filename));
-    
-    return NULL;
 }
 
 // //Checks if a port is available by attempting a temporary bind
@@ -477,9 +271,7 @@ void* port_request(void* arg) {
                 snprintf(size_response, sizeof(size_response), "SIZE:%ld", file_size);
                 send(client_filehandle, size_response, strlen(size_response), 0);
                 
-                std::stringstream ss;
-                ss << "SEED PORT " << my_bound_port << ": Client requested file size for '" << filename << "' → Responding with " << file_size << " bytes";
-                log_server(ss.str());
+                std::cout << "SEED PORT " << my_bound_port << ": Client requested file size for '" << filename << "' → Responding with " << file_size << " bytes" << std::endl;
             } else {
                 char error_msg[] = "ERROR: File not found";
                 send(client_filehandle, error_msg, strlen(error_msg), 0);
@@ -524,9 +316,7 @@ void* port_request(void* arg) {
         auto newline = strchr(filename, '\n');
         if (newline) *newline = '\0';
         
-        std::stringstream ss;
-        ss << "SEED PORT " << my_bound_port << ": Download request for '" << filename << "' starting at byte " << offset;
-        log_server(ss.str());
+        std::cout << "SEED PORT " << my_bound_port << ": Download request for '" << filename << "' starting at byte " << offset << std::endl;
         
         // Find the file in our folder
         auto my_folder_id = -1;
@@ -548,13 +338,11 @@ void* port_request(void* arg) {
                 long file_size = ftell(file);
                 fseek(file, 0, SEEK_SET);
                 
-                std::stringstream ss2;
-                ss2 << "SEED PORT " << my_bound_port << ": File found (" << file_size << " bytes total)";
-                log_server(ss2.str());
+                std::cout << "SEED PORT " << my_bound_port << ": File found (" << file_size << " bytes total)" << std::endl;
                 
                 // Check if offset is valid
                 if (offset >= file_size) {
-                    log_server("SEED: Offset beyond file size, no more data to send");
+                    std::cout << "SEED: Offset beyond file size, no more data to send" << std::endl;
                     fclose(file);
                     close(client_filehandle);
                     return NULL;
@@ -570,31 +358,23 @@ void* port_request(void* arg) {
                 
                 if (bytes_read > 0) {
                     if (send(client_filehandle, file_buffer, bytes_read, 0) <= 0) {
-                        log_server("SEED: Send failed!");
+                        std::cout << "SEED: Send failed!" << std::endl;
                     } else {
                         total_sent += bytes_read;
-                        std::stringstream ss3;
                         if (bytes_read == 32) {
-                            ss3 << "SEED PORT " << my_bound_port << ": Sent full chunk (32 bytes) from position " << offset << " to " << (offset + bytes_read - 1);
+                            std::cout << "SEED PORT " << my_bound_port << ": Sent full chunk (32 bytes) from position " << offset << " to " << (offset + bytes_read - 1) << std::endl;
                         } else {
-                            ss3 << "SEED PORT " << my_bound_port << ": Sent final chunk (" << bytes_read << " bytes) from position " << offset << " to " << (offset + bytes_read - 1) << " - FILE COMPLETE!";
+                            std::cout << "SEED PORT " << my_bound_port << ": Sent final chunk (" << bytes_read << " bytes) from position " << offset << " to " << (offset + bytes_read - 1) << " - FILE COMPLETE!" << std::endl;
                         }
-                        log_server(ss3.str());
                     }
                 } else {
-                    std::stringstream ss4;
-                    ss4 << "SEED PORT " << my_bound_port << ": No data available at offset " << offset << " (file may be complete)";
-                    log_server(ss4.str());
+                    std::cout << "SEED PORT " << my_bound_port << ": No data available at offset " << offset << " (file may be complete)" << std::endl;
                 }
                 
                 fclose(file);
-                std::stringstream ss5;
-                ss5 << "SEED: Sent " << total_sent << " bytes of file '" << filename << "'.";
-                log_server(ss5.str());
+                std::cout << "SEED: Sent " << total_sent << " bytes of file '" << filename << "'." << std::endl;
             } else {
-                std::stringstream ss6;
-                ss6 << "SEED PORT " << my_bound_port << ": File '" << filename << "' not found in local storage";
-                log_server(ss6.str());
+                std::cout << "SEED PORT " << my_bound_port << ": File '" << filename << "' not found in local storage" << std::endl;
                 
                 // Send error message
                 char error_msg[] = "ERROR: File not found";
@@ -623,7 +403,7 @@ void* server_thread(void* arg) {
             auto client_filehandle_ptr = (int*)malloc(sizeof(int));  // ths will allocate separate
             // memory for the clients file handle so each threads has its own copy
             if (client_filehandle_ptr == NULL) {
-                log_server("Error: Memory allocation failed");
+                std::cout << "Error: Memory allocation failed" << std::endl;
                 close(client_filehandle);
                 continue;
             }
@@ -668,7 +448,7 @@ void port_server() {
 
                 auto server_filehandle_ptr = (int*)malloc(sizeof(int));  
                 if (server_filehandle_ptr == NULL) {
-                    log_server("Error: Memory allocation failed");
+                    std::cout << "Error: Memory allocation failed" << std::endl;
                     close(sock);
                     return;
                 }
@@ -690,7 +470,6 @@ void download_file(){
      // Check if we have any files to download
      pthread_mutex_lock(&file_list_mutex);
      if (unique_file_count == 0) {
-         log_client("No files available to download. Please list files first (option 1).");
          std::cout << "No files available to download. Please list files first (option 1)." << std::endl;
          pthread_mutex_unlock(&file_list_mutex);
          return;
@@ -710,7 +489,6 @@ void download_file(){
      
      // Validate choice
      if (file_choice < 1 || file_choice > unique_file_count) {
-         log_client("Locating seeders... Failed - No seeders for file ID " + std::to_string(file_choice));
          std::cout << "Locating seeders... Failed" << std::endl;
          std::cout << "No seeders for file ID " << file_choice << "." <<std::endl;
          pthread_mutex_unlock(&file_list_mutex);
@@ -725,14 +503,12 @@ void download_file(){
          strncpy(filename, unique_files[file_choice - 1].filename, MAX_FILENAME_LENGTH - 1);
          filename[MAX_FILENAME_LENGTH - 1] = '\0'; // Ensure null termination
      } else {
-         log_client("Error: Filename too long.");
          std::cout << "Error: Filename too long." << std::endl;
          pthread_mutex_unlock(&file_list_mutex);
          return;
      }
      pthread_mutex_unlock(&file_list_mutex);
      
-     log_client("Scanning all seeds for file '" + std::string(filename) + "'...");
      std::cout << "Scanning all seeds for file '" << filename << "'..." << std::endl;
      
      // Scan all seeds for this file
@@ -740,7 +516,6 @@ void download_file(){
      scan_seeds_for_file(filename, available_seeds);
      
      if (available_seeds.empty()) {
-         log_client("No seeds found with file '" + std::string(filename) + "'. Cannot download.");
          std::cout << "No seeds found with file '" << filename << "'. Cannot download." << std::endl;
          return;
      }
@@ -748,62 +523,22 @@ void download_file(){
      // Get expected file size from one of the seeds
      auto expected_size = get_file_size_from_seed(available_seeds[0], filename);
      if (expected_size <= 0) {
-         log_client("Could not determine file size. Download may fail.");
          std::cout << "Could not determine file size. Download may fail." << std::endl;
      } else {
-         log_client("Expected file size: " + std::to_string(expected_size) + " bytes");
          std::cout << "Expected file size: " << expected_size << " bytes" << std::endl;
          
          // Check if file already exists locally with correct size
          char existing_path[1024];
          if (check_file_already_exists(filename, expected_size, existing_path, sizeof(existing_path))) {
-             log_client("File [" + std::to_string(file_choice) + "] " + std::string(filename) + " already exists");
              std::cout << " File [" << file_choice << "] " << filename << " already exists" << std::endl;
              return;
          } else {
-             log_client("File not found locally or size mismatch. Starting download...");
              std::cout << "File not found locally or size mismatch. Starting download..." << std::endl;
          }
      }
      
-     // Check if there's already an active download
-     pthread_mutex_lock(&download_thread_mutex);
-     if (active_download.is_active) {
-         std::cout << "A download is already in progress. Please wait for it to complete." << std::endl;
-         log_client("Download request rejected - another download already in progress");
-         pthread_mutex_unlock(&download_thread_mutex);
-         return;
-     }
-     
-     // Set up download thread data
-     strncpy(active_download.filename, filename, MAX_FILENAME_LENGTH - 1);
-     active_download.filename[MAX_FILENAME_LENGTH - 1] = '\0';
-     active_download.available_seeds = new std::vector<int>(available_seeds);
-     active_download.is_active = true;
-     
-     // Initialize progress tracking
-     active_download.total_size = 0;
-     active_download.downloaded_bytes = 0;
-     active_download.total_chunks = 0;
-     active_download.completed_chunks = 0;
-     
-     // Create background download thread
-     if (pthread_create(&active_download.thread_id, NULL, download_thread_worker, &active_download) != 0) {
-         std::cout << "Error: Failed to create download thread" << std::endl;
-         log_client("Error: Failed to create download thread");
-         delete active_download.available_seeds;
-         active_download.is_active = false;
-         pthread_mutex_unlock(&download_thread_mutex);
-         return;
-     }
-     
-     // Detach thread so it runs independently
-     pthread_detach(active_download.thread_id);
-     pthread_mutex_unlock(&download_thread_mutex);
-     
-     std::cout << "Download started in background for file: " << filename << std::endl;
-     std::cout << "You can continue using the menu while the download progresses." << std::endl;
-     log_client("Background download initiated for file: " + std::string(filename));
+     // Use round-robin download
+     download_file_round_robin(filename, available_seeds);
 }
 
 // New function to scan multiple seeds for the same file
@@ -814,13 +549,11 @@ void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
         if (port != my_bound_port) {  // Skip current bound port
-            log_client("Scanning seed at port " + std::to_string(port) + " for file '" + std::string(filename) + "'...");
-            std::cout << "Scanning seed at port " << port << "... ";
+            std::cout << "Scanning seed at port " << port << " for file '" << filename << "'... ";
             
             auto sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock < 0) {
-                log_client("socket failed for port " + std::to_string(port));
-                std::cout << "failed" << std::endl;
+                std::cout << "socket failed" << std::endl;
                 continue;
             }
             
@@ -841,15 +574,15 @@ void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds
                     // Check if filename exists in this seed's file list
                     char* line = strtok(buffer, "\n");
                     bool file_found = false;
-                    log_client("Checking files on seed " + std::to_string(port) + ":");
+                    std::cout << "Checking files on seed " << port << ":" << std::endl;
                     while (line != NULL) {
                         auto bracket_end = strchr(line, ']');
                         if (bracket_end && bracket_end[1] == ' ') {
                             auto seed_filename = bracket_end + 2;
-                            log_client("  Found: '" + std::string(seed_filename) + "' (length: " + std::to_string(strlen(seed_filename)) + ")");
+                            std::cout << "  Found: '" << seed_filename << "' (length: " << strlen(seed_filename) << ")" << std::endl;
                             if (strcmp(seed_filename, filename) == 0) {
                                 file_found = true;
-                                log_client("  MATCH!");
+                                std::cout << "  MATCH!" << std::endl;
                                 break;
                             }
                         }
@@ -857,19 +590,15 @@ void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds
                     }
                     
                     if (file_found) {
-                        log_client("FOUND!");
-                        std::cout << "found" << std::endl;
+                        std::cout << "FOUND!" << std::endl;
                         available_seeds.push_back(port);
                     } else {
-                        log_client("not found");
                         std::cout << "not found" << std::endl;
                     }
                 } else {
-                    log_client("no response from port " + std::to_string(port));
                     std::cout << "no response" << std::endl;
                 }
             } else {
-                log_client("port " + std::to_string(port) + " not running");
                 std::cout << "not running" << std::endl;
             }
             
@@ -877,14 +606,13 @@ void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds
         }
     }
     
-    log_client("Found " + std::to_string(available_seeds.size()) + " seed(s) with file '" + std::string(filename) + "'");
     std::cout << "Found " << available_seeds.size() << " seed(s) with file '" << filename << "'" << std::endl;
     
     // Try to get file size from first available seed for progress tracking
     if (!available_seeds.empty()) {
         auto file_size = get_file_size_from_seed(available_seeds[0], filename);
         if (file_size > 0) {
-            log_client("Estimated file size: " + std::to_string(file_size) + " bytes");
+            std::cout << "Estimated file size: " << file_size << " bytes" << std::endl;
         }
     }
 }
@@ -892,7 +620,6 @@ void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds
 // New function to download file using round-robin chunk distribution
 void download_file_round_robin(const char* filename, const std::vector<int>& available_seeds) {
     if (available_seeds.empty()) {
-        log_client("No seeds available for this file.");
         std::cout << "No seeds available for this file." << std::endl;
         return;
     }
@@ -911,7 +638,6 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
     }
     
     if (my_folder_id == -1) {
-        log_client("Error: Could not determine local folder.");
         std::cout << "Error: Could not determine local folder." << std::endl;
         return;
     }
@@ -924,29 +650,22 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
     
     // Directory and file will be created after getting first chunk
     
-    log_client("Starting round-robin download from " + std::to_string(total_seeds) + " seed(s)...");
-    log_client("Downloading in " + std::to_string(CHUNK_SIZE) + "-byte chunks...");
+    std::cout << "Starting round-robin download from " << total_seeds << " seed(s)..." << std::endl;
+    std::cout << "Downloading in " << CHUNK_SIZE << "-byte chunks..." << std::endl;
     
     // Initialize progress tracking
     auto total_bytes_downloaded = 0LL;
     auto chunk_count = 0;
     auto estimated_total_size = get_file_size_from_seed(available_seeds[0], filename);
     
-    // Update global progress tracking
-    pthread_mutex_lock(&download_thread_mutex);
-    if (active_download.is_active) {
-        active_download.total_size = estimated_total_size;
-        active_download.total_chunks = (estimated_total_size + CHUNK_SIZE - 1) / CHUNK_SIZE; // Round up
-    }
-    pthread_mutex_unlock(&download_thread_mutex);
-    
     if (estimated_total_size <= 0) {
         estimated_total_size = CHUNK_SIZE * 100; // Fallback estimate
-        log_client("Using fallback file size estimate: " + std::to_string(estimated_total_size) + " bytes");
+        std::cout << "Using fallback file size estimate: " << estimated_total_size << " bytes" << std::endl;
     }
     
-    // Initialize progress tracking (silent background mode)
-    log_client("Download Progress: Starting at 0/" + std::to_string(estimated_total_size) + " bytes");
+    // Show initial progress bar
+    std::cout << "\nDownload Progress:" << std::endl;
+    show_progress_bar(0, estimated_total_size);
     
     // Track which seeds have finished and their chunk counts
     std::vector<bool> seed_finished(total_seeds, false);
@@ -966,7 +685,7 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
         // Connect to current seed
         auto sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) {
-            log_client("Failed to create socket for seed at port " + std::to_string(current_seed_port));
+            std::cout << "\nFailed to create socket for seed at port " << current_seed_port << std::endl;
             current_seed_index = (current_seed_index + 1) % total_seeds;
             continue;
         }
@@ -977,7 +696,7 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
         inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
         
         if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-            log_client("Failed to connect to seed at port " + std::to_string(current_seed_port));
+            std::cout << "\nFailed to connect to seed at port " << current_seed_port << std::endl;
             close(sock);
             current_seed_index = (current_seed_index + 1) % total_seeds;
             continue;
@@ -1009,7 +728,7 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
                     if (strncmp(chunk_buffer, "ERROR:", 6) == 0) {
             // Don't spam error messages - this is normal when file is complete
             if (total_bytes_downloaded < estimated_total_size) {
-                log_client("Seed error from port " + std::to_string(current_seed_port) + ": " + std::string(chunk_buffer, bytes_received));
+                std::cout << "\nSeed error from port " << current_seed_port << ": " << std::string(chunk_buffer, bytes_received) << std::endl;
             }
             close(sock);
             current_seed_index = (current_seed_index + 1) % total_seeds;
@@ -1018,7 +737,7 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
             static int consecutive_errors = 0;
             consecutive_errors++;
             if (consecutive_errors >= total_seeds * 2) {
-                log_client("Too many consecutive errors. Download may be complete.");
+                std::cout << "\nToo many consecutive errors. Download may be complete." << std::endl;
                 break;
             }
             continue;
@@ -1035,7 +754,7 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
                 }
                 
                 if (first_source_folder_id == -1) {
-                    log_client("Error: Could not determine folder ID for port " + std::to_string(current_seed_port));
+                    std::cout << "\nError: Could not determine folder ID for port " << current_seed_port << std::endl;
                     close(sock);
                     return;
                 }
@@ -1044,9 +763,9 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
                 snprintf(download_dir, sizeof(download_dir), "files/seed%d/%d/%d", 
                          my_folder_id, my_folder_id, first_source_folder_id);
                 
-                log_client("Creating directory: " + std::string(download_dir));
+                std::cout << "\nCreating directory: " << download_dir << std::endl;
                 if (create_directory(download_dir) != 0) {
-                    log_client("Warning: Could not create directory " + std::string(download_dir));
+                    std::cout << "Warning: Could not create directory " << download_dir << std::endl;
                 }
                 
                 // Full path for the downloaded file
@@ -1054,7 +773,7 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
                 
                 // Check if the path was truncated
                 if (path_result >= sizeof(download_path)) {
-                    log_client("Error: File path too long, cannot download.");
+                    std::cout << "Error: File path too long, cannot download." << std::endl;
                     close(sock);
                     return;
                 }
@@ -1062,26 +781,19 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
                 // Create output file
                 output_file = fopen(download_path, "wb");
                 if (!output_file) {
-                    log_client("Failed to create output file: " + std::string(download_path));
+                    std::cout << "Failed to create output file: " << download_path << std::endl;
                     close(sock);
                     return;
                 }
                 
-                log_client("First chunk from seed at port " + std::to_string(current_seed_port) + " (folder ID " + std::to_string(first_source_folder_id) + ")");
+                std::cout << "First chunk from seed at port " << current_seed_port << 
+                             " (folder ID " << first_source_folder_id << ")" << std::endl;
             }
             
             // Write chunk to file
             fwrite(chunk_buffer, 1, bytes_received, output_file);
             total_bytes_downloaded += bytes_received;
             chunk_count++;
-            
-            // Update global progress tracking
-            pthread_mutex_lock(&download_thread_mutex);
-            if (active_download.is_active) {
-                active_download.downloaded_bytes = total_bytes_downloaded;
-                active_download.completed_chunks = chunk_count;
-            }
-            pthread_mutex_unlock(&download_thread_mutex);
             
             // Reset consecutive failures since we got data
             static int consecutive_failures = 0;
@@ -1090,34 +802,34 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
             // Check if we've reached end of file (less than full chunk received)
             if (bytes_received < CHUNK_SIZE) {
                 chunks_per_seed[current_seed_index]++; // Count the final partial chunk too
-                log_client("Port " + std::to_string(current_seed_port) + " finished sending data (sent " + std::to_string(bytes_received) + " bytes in final chunk) [Total chunks from this seed: " + std::to_string(chunks_per_seed[current_seed_index]) + "]");
+                std::cout << "\nPort " << current_seed_port << " finished sending data (sent " << bytes_received << " bytes in final chunk) [Total chunks from this seed: " << chunks_per_seed[current_seed_index] << "]" << std::endl;
                 seed_finished[current_seed_index] = true;
                 active_seed_count--;
                 
                 if (active_seed_count == 0 || total_bytes_downloaded >= estimated_total_size) {
-                    log_client("End of file detected. Final size: " + std::to_string(total_bytes_downloaded) + " bytes");
+                    std::cout << "\nEnd of file detected. Final size: " << total_bytes_downloaded << " bytes" << std::endl;
                     break;
                 }
             } else {
                 // Full chunk received, increment counter and show progress
                 chunks_per_seed[current_seed_index]++;
-                log_client("Port " + std::to_string(current_seed_port) + " sent 32-byte chunk (" + std::to_string(chunk_count) + ") [Total from this seed: " + std::to_string(chunks_per_seed[current_seed_index]) + "]");
+                std::cout << "\nPort " << current_seed_port << " sent 32-byte chunk (" << chunk_count << ") [Total from this seed: " << chunks_per_seed[current_seed_index] << "]" << std::endl;
             }
             
             // Also break if we've downloaded more than expected
             if (total_bytes_downloaded >= estimated_total_size) {
-                log_client("Download completed. Final size: " + std::to_string(total_bytes_downloaded) + " bytes");
+                std::cout << "\nDownload completed. Final size: " << total_bytes_downloaded << " bytes" << std::endl;
                 break;
             }
             
             // Safety check: if we've downloaded way more than expected, stop
             if (chunk_count > 10000) { // Prevent infinite loops
-                log_client("Safety limit reached. Stopping download at " + std::to_string(total_bytes_downloaded) + " bytes");
+                std::cout << "\nSafety limit reached. Stopping download at " << total_bytes_downloaded << " bytes" << std::endl;
                 break;
             }
             
         } else {
-            log_client("Port " + std::to_string(current_seed_port) + " has no more data to send");
+            std::cout << "\nPort " << current_seed_port << " has no more data to send" << std::endl;
             seed_finished[current_seed_index] = true;
             active_seed_count--;
             
@@ -1126,7 +838,7 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
             
             // If all seeds are finished, we're done
             if (active_seed_count == 0) {
-                log_client("All seeds have finished sending data. Download complete.");
+                std::cout << "\nAll seeds have finished sending data. Download complete." << std::endl;
                 break;
             }
             continue;
@@ -1136,49 +848,36 @@ void download_file_round_robin(const char* filename, const std::vector<int>& ava
         
         // Move to next seed in round-robin fashion
         current_seed_index = (current_seed_index + 1) % total_seeds;
-        
-        // Add delay between chunks for better progress monitoring
-        // This simulates realistic network conditions and allows for status updates
-        usleep(CHUNK_DELAY_MICROSECONDS);
     }
     
     if (output_file) {
         fclose(output_file);
     }
     
-    // Final download completion (silent background mode)
+    // Show final progress bar at 100%
     if (total_bytes_downloaded > 0) {
-        log_client("Download Progress: Completed at " + std::to_string(total_bytes_downloaded) + "/" + std::to_string(total_bytes_downloaded) + " bytes (100.0%)");
-        log_client("Round-robin download completed!");
-        log_client("Total bytes downloaded: " + std::to_string(total_bytes_downloaded));
-        log_client("Total chunks downloaded: " + std::to_string(chunk_count));
-        log_client("File saved to: " + std::string(download_path));
+        show_progress_bar(total_bytes_downloaded, total_bytes_downloaded);
+        std::cout << "\n\nRound-robin download completed!" << std::endl;
+        std::cout << "Total bytes downloaded: " << total_bytes_downloaded << std::endl;
+        std::cout << "Total chunks downloaded: " << chunk_count << std::endl;
+        std::cout << "File saved to: " << download_path << std::endl;
         
         // Show detailed chunk distribution
-        log_client("Chunk Distribution by Seed:");
+        std::cout << "\nChunk Distribution by Seed:" << std::endl;
         int total_chunks_check = 0;
         for (size_t i = 0; i < total_seeds; i++) {
             if (chunks_per_seed[i] > 0) {
                 auto port = available_seeds[i];
                 auto percentage = (chunks_per_seed[i] * 100.0) / chunk_count;
-                std::stringstream ss;
-                ss << "  Port " << port << ": " << chunks_per_seed[i] << " chunks (" 
-                   << std::fixed << std::setprecision(1) << percentage << "%)";
-                log_client(ss.str());
+                std::cout << "  Port " << port << ": " << chunks_per_seed[i] << " chunks (" 
+                          << std::fixed << std::setprecision(1) << percentage << "%)" << std::endl;
                 total_chunks_check += chunks_per_seed[i];
             }
         }
-        log_client(" Verification: " + std::to_string(total_chunks_check) + "/" + std::to_string(chunk_count) + " chunks accounted for");
-        
-        // Close client logging after successful download
-        close_client_logging();
+        std::cout << " Verification: " << total_chunks_check << "/" << chunk_count << " chunks accounted for" << std::endl;
     } else {
-        log_client("Download failed - no data received.");
         std::cout << "\nDownload failed - no data received." << std::endl;
         remove(download_path);
-        
-        // Close client logging after failed download
-        close_client_logging();
     }
 }
 
@@ -1289,19 +988,18 @@ long long get_file_size_from_seed(int port, const char* filename) {
         buffer[bytes_received] = '\0';
         if (strncmp(buffer, "SIZE:", 5) == 0) {
             long long file_size = atoll(buffer + 5);
-            log_client("Exact file size from seed: " + std::to_string(file_size) + " bytes");
+            std::cout << "Exact file size from seed: " << file_size << " bytes" << std::endl;
             return file_size;
         }
     }
     
     // Fallback: use a reasonable default for unknown files
-    log_client("Could not determine file size, using default estimate");
+    std::cout << "Could not determine file size, using default estimate" << std::endl;
     return 1024 * 1024; // 1MB default
 }
 
 // Port2Port File Discovery - connect to other running instances
 void listAvailableFiles() {
-    log_client("Searching for files...");
     std::cout << "\nSearching for files... " << std::endl;
     
     // Reset file counter
@@ -1315,13 +1013,11 @@ void listAvailableFiles() {
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
         if (port != my_bound_port) {
-            log_client("Trying to connect to port " + std::to_string(port));
             std::cout << "Trying to connect to port " << port << " ";
             
             //this will create a socket for the port
             auto sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock < 0) {
-                log_client("socket failed for port " + std::to_string(port));
                 std::cout << "socket failed" << std::endl;
                 continue;
             }
@@ -1338,7 +1034,6 @@ void listAvailableFiles() {
                 auto n = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (n > 0) {
                     buffer[n] = '\0';
-                    log_client("connected to port " + std::to_string(port) + ", found files");
                     std::cout << "connected, found files" << std::endl;
                     seeds_found++;
                     
@@ -1352,11 +1047,9 @@ void listAvailableFiles() {
                         line = strtok(NULL, "\n");
                     }
                 } else {
-                    log_client("no response from port " + std::to_string(port));
                     std::cout << "no response" << std::endl;
                 }
             } else {
-                log_client("port " + std::to_string(port) + " not running");
                 std::cout << "not running" << std::endl;
             }
             
@@ -1364,51 +1057,22 @@ void listAvailableFiles() {
         }
     }
     
-    log_client("Search completed.");
     std::cout << "done." << std::endl;
     
     // Display results
     pthread_mutex_lock(&file_list_mutex);
     if (unique_file_count == 0) {
-        log_client("No files found from port instances. (No other instances appear to be running)");
         std::cout << "No files found from port instances." << std::endl;
         std::cout << "(No other instances appear to be running)" << std::endl;
     } else {
-        log_client("Files available. Found files from " + std::to_string(seeds_found) + " running port(s)");
         std::cout << "Files available." << std::endl;
         for (auto i = 0; i < unique_file_count; i++) {
-            log_client("[" + std::to_string(i + 1) + "] " + std::string(unique_files[i].filename) + " (from port " + std::to_string(unique_files[i].source_port) + ")");
             std::cout << "[" << i + 1 << "] " << 
                 unique_files[i].filename << " (from port " << unique_files[i].source_port << ")" << std::endl;
         }
         std::cout << "\n(Found files from " << seeds_found << " running port(s))" << std::endl;
     }
     pthread_mutex_unlock(&file_list_mutex);
-}
-
-void show_download_status() {
-    std::cout << "\nDownload status:" << std::endl;
-    
-    pthread_mutex_lock(&download_thread_mutex);
-    if (active_download.is_active) {
-        // Calculate percentage
-        double percentage = 0.0;
-        if (active_download.total_size > 0) {
-            percentage = (double)active_download.downloaded_bytes / active_download.total_size * 100.0;
-        }
-        
-        // Format sizes
-        std::string downloaded_str = format_file_size(active_download.downloaded_bytes);
-        std::string total_str = format_file_size(active_download.total_size);
-        
-        // Display progress
-        std::cout << "[1] " << active_download.filename << "  " 
-                  << downloaded_str << "/" << total_str 
-                  << " (" << std::fixed << std::setprecision(2) << percentage << "%)" << std::endl;
-    } else {
-        std::cout << "No active downloads." << std::endl;
-    }
-    pthread_mutex_unlock(&download_thread_mutex);
 }
 
 void show_menu() {
@@ -1432,7 +1096,7 @@ void show_menu() {
                 download_file();
                 break;
             case 3:
-                show_download_status();
+                std::cout << "Checking download status..." << std::endl;
                 break;
             case 4:
                 std::cout << "Exiting..." << std::endl;
@@ -1447,14 +1111,6 @@ int main() {
     bound_port_count = 0;
     unique_file_count = 0;
     my_bound_port = -1;
-    
-    // Initialize download thread data
-    active_download.is_active = false;
-    active_download.available_seeds = nullptr;
-    active_download.total_size = 0;
-    active_download.downloaded_bytes = 0;
-    active_download.total_chunks = 0;
-    active_download.completed_chunks = 0;
     
     // Start single port server
     port_server();
@@ -1471,14 +1127,7 @@ int main() {
         close(port_threads[0].socket_FileHandle);
     }
     
-    // Close any active logging
-    close_client_logging();
-    close_server_logging();
-    
     pthread_mutex_destroy(&file_list_mutex);
-    pthread_mutex_destroy(&client_log_mutex);
-    pthread_mutex_destroy(&server_log_mutex);
-    pthread_mutex_destroy(&download_thread_mutex);
     
     return 0;
 }

@@ -1,0 +1,118 @@
+Here’s a concise walkthrough of how your program works, organized by responsibility and flow.
+
+### High-level purpose
+- Acts as both a seed server (serving file chunks to others) and a client (discovering files and downloading them from other seeds).
+- Single bound port per run (from `[8080..8084]`), with background logging for both client and server.
+
+### Key components
+- **Config/Globals**
+  - `PORTS`, `MAX_PORTS`, `CHUNK_SIZE=32 bytes` (in download), `CHUNK_DELAY_MICROSECONDS`.
+  - Shared lists: `unique_files[]` (discovered files) and `active_download` (background download state).
+  - Mutexes for thread-safe logs and shared state.
+
+- **Logging**
+  - Client logs: `download_file_YYYYMMDD_HHMMSS_port<myport>.log`.
+  - Server logs: `seedapp_port<myport>_log_YYYYMMDD_HHMMSS.txt`.
+  - Thread-safe via `pthread_mutex_t`.
+
+- **Directory layout**
+  - Each bound port maps to a folder ID \(1..5\).
+  - Files served from: `files/seed<id>/<id>/...`
+  - Downloads saved under: `files/seed<my>/<my>/<first-source-id>/<filename>`
+
+### Startup and server
+1. `main()` → `port_server()`:
+   - Binds to the first available port in `PORTS`, sets `my_bound_port`, spawns the server thread.
+2. `server_thread()`:
+   - Loops on `accept()`.
+   - For each connection, spawns a detached handler thread `port_request()`.
+
+### Server protocol (handler)
+`port_request()` supports:
+- `LIST`
+  - Returns this seed’s file list from `files/seed<my>/<my>`.
+- `FILESIZE <filename>`
+  - Returns `SIZE:<bytes>` for exact file bytes.
+- `DOWNLOAD <filename>|<offset>`
+  - Opens local file, seeks to `offset`, sends up to 32 bytes once, then closes.
+  - This server sends exactly one chunk per request. The client connects again for the next chunk.
+
+```566:584:D:\C++\DraftCodes\atonce.cpp
+// Send one 32-byte chunk from the offset
+char file_buffer[32];
+size_t bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file);
+if (bytes_read > 0) {
+    send(client_filehandle, file_buffer, bytes_read, 0);
+    // logs "full chunk" vs "final chunk" if < 32
+}
+```
+
+### Client menu flow
+- `[1] List available files` → `listAvailableFiles()`
+  - Connects to all other ports, sends `LIST`, parses results into `unique_files` (deduplicated).
+- `[2] Download file` → `download_file()`
+  - Lets you pick from `unique_files`.
+  - Probes seeds that have the file (`scan_seeds_for_file()`).
+  - Fetches exact size from one seed via `FILESIZE`.
+  - Starts the background download thread.
+
+### Background download thread
+- Entry: `download_thread_worker()` → `download_file_round_robin()`.
+- Round robin over `available_seeds`:
+  - Maintains `total_bytes_downloaded` and `chunk_count`.
+  - For each chunk:
+    - Connect to current seed.
+    - `send("DOWNLOAD filename|current_offset")`.
+    - `recv` up to 32 bytes.
+    - Append to output file, rotate to next seed, small delay.
+
+```986:999:D:\C++\DraftCodes\atonce.cpp
+snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", filename, total_bytes_downloaded);
+send(sock, request, strlen(request), 0);
+// Read exactly CHUNK_SIZE bytes or until connection closes
+while (total_chunk_bytes < CHUNK_SIZE) {
+    auto bytes = recv(sock, chunk_buffer + total_chunk_bytes, CHUNK_SIZE - total_chunk_bytes, 0);
+    if (bytes <= 0) break;
+    total_chunk_bytes += bytes;
+}
+```
+
+- The first successfully received chunk determines the download directory (based on the seed’s port → folder ID).
+- Seed finishes when it returns a short chunk (<32 bytes) from end-of-file.
+- Stops when:
+  - `total_bytes_downloaded >= estimated_total_size`, or
+  - All seeds are finished, or
+  - Safety cap: `chunk_count > 10000`.
+
+```1113:1117:D:\C++\DraftCodes\atonce.cpp
+// Safety check
+if (chunk_count > 10000) {
+    log_client("Safety limit reached. Stopping download at " + std::to_string(total_bytes_downloaded) + " bytes");
+    break;
+}
+```
+
+### Progress and status
+- Estimated total size from `FILESIZE` is set into `active_download` for status.
+- `[3] Download status` prints `downloaded/total` with percentage (from `active_download`).
+- Final logs currently say “100%” of downloaded/downloaded bytes even if it stopped early—so if the safety cap triggers, it will misleadingly show 100% of the partial file.
+
+### Concurrency model
+- Threads:
+  - Main thread (menu/UI).
+  - One server thread.
+  - One background download thread (at most one).
+  - Many detached handler threads—one per incoming connection.
+- Shared state guarded by mutexes.
+
+### Notable behaviors/quirks to be aware of
+- Server sends only one 32-byte chunk per `DOWNLOAD` connection; the client reconnects for each chunk.
+- Safety cap limits to 10,000 chunks ⇒ roughly 320,000 bytes max at current `CHUNK_SIZE=32`.
+- The comment for `CHUNK_DELAY_MICROSECONDS = 5000` says “100ms,” but 5000 microseconds is 5ms.
+- “Completed at 100%” log is relative to bytes downloaded, not file size; can be misleading on early stop.
+
+If you want, I can:
+- Rename/organize functions into sections,
+- Extract protocol handling into a smaller server module,
+- Fix the safety cap and “100%” reporting,
+- Add inline docstrings for each function.

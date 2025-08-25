@@ -1,0 +1,664 @@
+#include <iostream>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <sys/time.h>
+#include <fcntl.h>
+#include <sys/stat.h>  // For mkdir
+#include <errno.h>     // For errno
+
+// Port configuration - easily changeable
+const int PORTS[] = {8080, 8081, 8082, 8083, 8084};
+const int MAX_PORTS = 5;
+const int MAX_FILES = 100;
+const int MAX_FILENAME_LENGTH = 256;
+
+//global variables
+typedef struct {
+    int port;
+    int folder_id;
+    char folder_path[256];
+    int socket_FileHandle; //for server side, file handling
+    int is_bound;
+    pthread_t thread_id;
+    int thread_index;
+} port_thread_data_t;
+
+typedef struct {
+    char filename[MAX_FILENAME_LENGTH];
+    int source_port;
+}file_info_t;
+
+port_thread_data_t port_threads[MAX_PORTS];
+int bound_port_count = 0;
+file_info_t unique_files[MAX_FILES];  // Use the structure instead of char array
+int unique_file_count = 0;
+int my_bound_port = -1; 
+
+pthread_mutex_t file_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void setup_socket_addr(struct sockaddr_in* addr, int port) {
+    memset(addr, 0, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    addr->sin_addr.s_addr = INADDR_ANY;
+    addr->sin_port = htons(port);
+}
+
+// Helper function to create directories recursively
+int create_directory(const char* path) {
+    char temp[1024];
+    char* pos = NULL;
+    
+    // Safe string copy with bounds checking
+    if (strlen(path) >= sizeof(temp)) {
+        return -1; // Path too long
+    }
+    
+    strncpy(temp, path, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0'; // Ensure null termination
+    
+    auto len = strlen(temp);
+    
+    // Remove trailing slash if present
+    if (len > 0 && temp[len - 1] == '/') {
+        temp[len - 1] = '\0';
+        len--;
+    }
+    
+    // Create directories recursively
+    for (pos = temp + 1; *pos; pos++) {
+        if (*pos == '/') {
+            *pos = '\0';
+            if (mkdir(temp, 0755) != 0 && errno != EEXIST) {
+                return -1;
+            }
+            *pos = '/';
+        }
+    }
+    
+    // Create the final directory
+    if (mkdir(temp, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    
+    return 0;
+}
+
+// //Checks if a port is available by attempting a temporary bind
+// int is_port_available(int port) {
+//     int sock = socket(AF_INET, SOCK_STREAM, 0);
+//     if (sock < 0) {
+//         return 0;
+//     }
+
+//     struct sockaddr_in addr;
+//     setup_socket_addr(&addr, port);
+
+//     int result = bind(sock, (struct sockaddr*)&addr, sizeof(addr)); 
+//     close(sock);
+
+//     return result == 0;
+// }
+
+//This will permanently bind to the port and starts listening
+int bind_and_listen(int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    setup_socket_addr(&addr, port);
+
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (listen(sock, 5) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    return sock;
+}
+
+//this will help prevent duplicates
+void add_unique_file(const char* filename, int source_port) {
+    pthread_mutex_lock(&file_list_mutex);
+    
+    for (auto i = 0; i < unique_file_count; i++) {
+        if (strcmp(unique_files[i].filename, filename) == 0) {
+            pthread_mutex_unlock(&file_list_mutex);
+            return;
+        }
+    }
+    
+    if (unique_file_count < MAX_FILES) {
+        // Safe string copy with bounds checking
+        if (strlen(filename) < MAX_FILENAME_LENGTH) {
+            strncpy(unique_files[unique_file_count].filename, filename, MAX_FILENAME_LENGTH - 1);
+            unique_files[unique_file_count].filename[MAX_FILENAME_LENGTH - 1] = '\0'; // Ensure null termination
+            unique_files[unique_file_count].source_port = source_port;
+            unique_file_count++;
+        }
+    }
+    pthread_mutex_unlock(&file_list_mutex);
+}
+
+// Get files from our own folder (for serving to other ports)
+void get_own_files(char* response, int max_size) {
+    auto my_folder_id = -1;
+
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        if (PORTS[i] == my_bound_port) {
+            my_folder_id = i + 1;
+            break;
+        }
+    }
+    
+    if (my_folder_id == -1) {
+        response[0] = '\0';  // Safe way to clear string
+        return;
+    }
+    
+    char folder_path[256];
+    snprintf(folder_path, sizeof(folder_path), "files/seed%d/%d", my_folder_id, my_folder_id);
+    
+    response[0] = '\0';
+    DIR *dr = opendir(folder_path);
+    if (dr != NULL) {
+        struct dirent *de;
+        auto file_count = 0;
+        
+        while ((de = readdir(dr)) != NULL) {
+            if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0) {
+                char file_entry[512];
+                snprintf(file_entry, sizeof(file_entry), "[%d] %s\n", ++file_count, de->d_name);
+                
+                // Safe string concatenation with bounds checking
+                size_t current_len = strlen(response);
+                size_t entry_len = strlen(file_entry);
+                if (current_len + entry_len < (size_t)max_size - 1) {
+                    strncat(response, file_entry, max_size - current_len - 1);
+                } else {
+                    break; // Buffer full, stop adding files
+                }
+            }
+        }
+        closedir(dr);
+    }
+}
+
+// Handle port requests (server side)
+void* port_request(void* arg) {
+    auto client_filehandle = *(int*)arg; // extract the value
+    free(arg);  //free the memory
+    
+    char buffer[1024]; //buffer to hold the data from the client
+    auto bytes = recv(client_filehandle, buffer, sizeof(buffer) - 1, 0); //waits client to send something
+    if (bytes <= 0) {
+        close(client_filehandle);
+        return NULL;
+    }
+    buffer[bytes] = '\0';
+    
+
+
+    if (strcmp(buffer, "LIST") == 0) {
+        char response[2048];
+        get_own_files(response, sizeof(response));
+        send(client_filehandle, response, strlen(response), 0); //sending back to client
+    }
+    else if (strncmp(buffer, "DOWNLOAD ", 9) == 0) {
+        // New DOWNLOAD command handling
+        char filename[MAX_FILENAME_LENGTH];
+        // Safe string copy with bounds checking
+        size_t filename_len = strlen(buffer + 9);
+        if (filename_len < MAX_FILENAME_LENGTH) {
+            strncpy(filename, buffer + 9, MAX_FILENAME_LENGTH - 1);
+            filename[MAX_FILENAME_LENGTH - 1] = '\0'; // Ensure null termination
+        } else {
+            // Filename too long, send error
+            char error_msg[] = "ERROR: Filename too long";
+            send(client_filehandle, error_msg, strlen(error_msg), 0);
+            close(client_filehandle);
+            return NULL;
+        }
+        
+        // Remove trailing whitespace/newlines
+        auto newline = strchr(filename, '\n');
+        if (newline) *newline = '\0';
+        
+        std::cout << "SEED: Download request received for '" << filename << "'" << std::endl;
+        
+        // Find the file in our folder
+        auto my_folder_id = -1;
+        for (auto i = 0; i < MAX_PORTS; i++) {
+            if (PORTS[i] == my_bound_port) {
+                my_folder_id = i + 1;
+                break;
+            }
+        }
+        
+        if (my_folder_id != -1) {
+            char file_path[1024];
+            snprintf(file_path, sizeof(file_path), "files/seed%d/%d/%s", my_folder_id, my_folder_id, filename);
+            
+            FILE *file = fopen(file_path, "rb");
+            if (file) {
+                std::cout << "SEED: File found, sending to requester..." << std::endl;
+                
+                // Send file in chunks
+                char file_buffer[1024];
+                size_t bytes_read;
+                auto total_sent = 0;
+                
+                while ((bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0) {
+                    if (send(client_filehandle, file_buffer, bytes_read, 0) <= 0) {
+                        std::cout << "SEED: Send failed!" << std::endl;
+                        break;  // Connection error
+                    }
+                    total_sent += bytes_read;
+                }
+                
+                fclose(file);
+                std::cout << "SEED: File '" << filename << "' sent successfully (" << total_sent << " bytes)." << std::endl;
+            } else {
+                std::cout << "SEED: File not found: " << file_path << std::endl;
+                
+                // Send error message
+                char error_msg[] = "ERROR: File not found";
+                send(client_filehandle, error_msg, strlen(error_msg), 0);
+            }
+        }
+    }
+    
+    close(client_filehandle);
+    return NULL;
+}
+
+// Server thread to accept port connections
+void* server_thread(void* arg) {
+    //int server_filehandle = port_threads[0].socket_FileHandle; //setting a socket file handle for the server
+
+    auto server_filehandle = *(int*)arg; //this will get the client file handle from the argument
+    free(arg); //this will release heap memory in the malloc
+
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    
+    while (1) { //loop infinitely
+        auto client_filehandle = accept(server_filehandle, (struct sockaddr*)&client_addr, &client_len); // this will wait for other ports
+        if (client_filehandle >= 0) {
+            auto client_filehandle_ptr = (int*)malloc(sizeof(int));  // ths will allocate separate
+            // memory for the clients file handle so each threads has its own copy
+            if (client_filehandle_ptr == NULL) {
+                std::cout << "Error: Memory allocation failed" << std::endl;
+                close(client_filehandle);
+                continue;
+            }
+          
+            *client_filehandle_ptr = client_filehandle;
+            
+            //this will create a new thread for each client
+            pthread_t handler_thread;
+            pthread_create(&handler_thread, NULL, port_request, client_filehandle_ptr); //If new port is bounded, it will create a new thread
+            pthread_detach(handler_thread);
+        }
+    }
+    return NULL;
+}
+
+void port_server() {
+    std::cout << "Finding available ports...";
+    
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        auto port = PORTS[i];
+        
+        //if (is_port_available(port)) {
+            auto sock = bind_and_listen(port);
+            if (sock >= 0) {
+                my_bound_port = port;
+                
+                // Set up port thread data
+                port_threads[0].port = port;
+                port_threads[0].folder_id = i + 1;
+                port_threads[0].thread_index = 0;
+                port_threads[0].socket_FileHandle = sock;
+                port_threads[0].is_bound = 1;
+                snprintf(port_threads[0].folder_path, sizeof(port_threads[0].folder_path), 
+                         "files/seed%d/%d", port_threads[0].folder_id, port_threads[0].folder_id);
+                
+                bound_port_count = 1;
+                
+                std::cout << " Found port " << port << "." << std::endl;
+                std::cout << "Listening at port " << port << "." << std::endl;
+                
+                // Start server thread to handle port requests
+
+                auto server_filehandle_ptr = (int*)malloc(sizeof(int));  
+                if (server_filehandle_ptr == NULL) {
+                    std::cout << "Error: Memory allocation failed" << std::endl;
+                    close(sock);
+                    return;
+                }
+                *server_filehandle_ptr = sock;
+                pthread_t server_tid;
+                pthread_create(&server_tid, NULL, server_thread, server_filehandle_ptr);
+                pthread_detach(server_tid);
+                
+                return;
+            }
+        //}
+    }
+    
+    std::cout << " No available ports found." << std::endl;
+}
+
+void download_file(){
+    
+     // Check if we have any files to download
+     pthread_mutex_lock(&file_list_mutex);
+     if (unique_file_count == 0) {
+         std::cout << "No files available to download. Please list files first (option 1)." << std::endl;
+         pthread_mutex_unlock(&file_list_mutex);
+         return;
+     }
+     
+     // Show available files
+     std::cout << "Available files for download:" << std::endl;
+     for (auto i = 0; i < unique_file_count; i++) {
+         std::cout << "[" << i + 1 << "] " << 
+                unique_files[i].filename << " (from seed at port " << unique_files[i].source_port << ")" << std::endl;
+     }
+     
+     // Get user's choice
+     std::cout << "\nEnter file number to download (1-" << unique_file_count << "): ";
+     auto file_choice = 0;
+     std::cin >> file_choice;
+     
+     // Validate choice
+     if (file_choice < 1 || file_choice > unique_file_count) {
+         std::cout << "Invalid file number." << std::endl;
+         pthread_mutex_unlock(&file_list_mutex);
+         return;
+     }
+     
+     // Get file info before releasing the mutex
+     char filename[MAX_FILENAME_LENGTH];
+     auto target_port = 0;
+     // Safe string copy with bounds checking
+     size_t filename_len = strlen(unique_files[file_choice - 1].filename);
+     if (filename_len < MAX_FILENAME_LENGTH) {
+         strncpy(filename, unique_files[file_choice - 1].filename, MAX_FILENAME_LENGTH - 1);
+         filename[MAX_FILENAME_LENGTH - 1] = '\0'; // Ensure null termination
+     } else {
+         std::cout << "Error: Filename too long." << std::endl;
+         pthread_mutex_unlock(&file_list_mutex);
+         return;
+     }
+     target_port = unique_files[file_choice - 1].source_port;
+     pthread_mutex_unlock(&file_list_mutex);
+     
+     std::cout << "Downloading '" << filename << "' from seed at port " << target_port << "..." << std::endl;
+     
+     // Connect to the seed
+     auto sock = socket(AF_INET, SOCK_STREAM, 0);
+     if (sock < 0) {
+         std::cout << "Failed to create socket." << std::endl;
+         return;
+     }
+     
+     struct sockaddr_in addr;
+     addr.sin_family = AF_INET;
+     addr.sin_port = htons(target_port);
+     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+     
+     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+         std::cout << "Failed to connect to seed at port " << target_port << "." << std::endl;
+         close(sock);
+         return;
+     }
+     
+     // Send download request
+     char request[512];
+     snprintf(request, sizeof(request), "DOWNLOAD %s", filename);
+     send(sock, request, strlen(request), 0);
+     
+     // Determine where to save the file
+     auto my_folder_id = -1;
+     for (auto i = 0; i < MAX_PORTS; i++) {
+         if (PORTS[i] == my_bound_port) {
+             my_folder_id = i + 1;
+             break;
+         }
+     }
+     
+     if (my_folder_id == -1) {
+         std::cout << "Error: Could not determine local folder." << std::endl;
+         close(sock);
+         return;
+     }
+     
+     // Calculate source folder_id from source port
+     auto source_folder_id = -1;
+     for (auto i = 0; i < MAX_PORTS; i++) {
+         if (PORTS[i] == target_port) {
+             source_folder_id = i + 1;
+             break;
+         }
+     }
+     
+     if (source_folder_id == -1) {
+         std::cout << "Error: Could not determine source folder ID." << std::endl;
+         close(sock);
+         return;
+     }
+     
+     // Create download directory path: files/seed{my_id}/1/{source_id}/
+     char download_dir[1024];
+     snprintf(download_dir, sizeof(download_dir), "files/seed%d/%d/%d", my_folder_id, my_folder_id, source_folder_id);
+     
+     // Create the directory if it doesn't exist
+     std::cout << "Creating directory: " << download_dir << std::endl;
+     if (create_directory(download_dir) != 0) {
+         std::cout << "Warning: Could not create directory " << download_dir << std::endl;
+     }
+     
+     // Full path for the downloaded file
+     char download_path[1024];
+     auto path_result = snprintf(download_path, sizeof(download_path), "%s/%s", download_dir, filename);
+     
+     // Check if the path was truncated
+     if (path_result >= sizeof(download_path)) {
+         std::cout << "Error: File path too long, cannot download." << std::endl;
+         close(sock);
+         return;
+     }
+     
+     // Create output file
+     FILE *output_file = fopen(download_path, "wb");
+     if (!output_file) {
+         std::cout << "Failed to create output file: " << download_path << std::endl;
+         close(sock);
+         return;
+     }
+     
+     // Receive file data
+     char buffer[1024];
+     ssize_t bytes_received;
+     auto total_bytes = 0;
+     
+     std::cout << "Receiving data..." << std::endl;
+     while ((bytes_received = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
+         // Check for error message
+         if (total_bytes == 0 && strncmp(buffer, "ERROR:", 6) == 0) {
+             std::cout << "Seed error: " << std::string(buffer, bytes_received) << std::endl;
+             fclose(output_file);
+             close(sock);
+             remove(download_path); // Delete the empty file
+             return;
+         }
+         
+         // Write received data to file
+         fwrite(buffer, 1, bytes_received, output_file);
+         total_bytes += bytes_received;
+     }
+     
+     fclose(output_file);
+     close(sock);
+     
+     if (total_bytes > 0) {
+         std::cout << "Download completed! File saved to: " << download_path << " (" << total_bytes << " bytes)" << std::endl;
+         std::cout << "File is now available in your local folder (" << download_dir << ")" << std::endl;
+     } else {
+         std::cout << "Download failed - no data received." << std::endl;
+         remove(download_path); // Delete the empty file
+     }
+
+
+}
+
+// Port2Port File Discovery - connect to other running instances
+void listAvailableFiles() {
+    std::cout << "\nSearching for files... " << std::endl;
+    
+    // Reset file counter
+    pthread_mutex_lock(&file_list_mutex);
+    unique_file_count = 0;
+    pthread_mutex_unlock(&file_list_mutex);
+    
+    auto seeds_found = 0;
+    
+    // Try to connect to all other ports
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        auto port = PORTS[i];
+        if (port != my_bound_port) {
+            std::cout << "Trying to connect to port " << port << " ";
+            
+            //this will create a socket for the port
+            auto sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) {
+                std::cout << "socket failed" << std::endl;
+                continue;
+            }
+            
+            struct sockaddr_in addr;
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(port);
+            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+            
+            if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                send(sock, "LIST", strlen("LIST"), 0);
+                
+                char buffer[1024];
+                auto n = recv(sock, buffer, sizeof(buffer) - 1, 0);
+                if (n > 0) {
+                    buffer[n] = '\0';
+                    std::cout << "connected, found files" << std::endl;
+                    seeds_found++;
+                    
+                    // Parse response and add files
+                    auto line = strtok(buffer, "\n");
+                    while (line != NULL) {
+                        auto bracket_end = strchr(line, ']');
+                        if (bracket_end && bracket_end[1] == ' ') {
+                            add_unique_file(bracket_end + 2, port);
+                        }
+                        line = strtok(NULL, "\n");
+                    }
+                } else {
+                    std::cout << "no response" << std::endl;
+                }
+            } else {
+                std::cout << "not running" << std::endl;
+            }
+            
+            close(sock);
+        }
+    }
+    
+    std::cout << "done." << std::endl;
+    
+    // Display results
+    pthread_mutex_lock(&file_list_mutex);
+    if (unique_file_count == 0) {
+        std::cout << "No files found from port instances." << std::endl;
+        std::cout << "(No other instances appear to be running)" << std::endl;
+    } else {
+        std::cout << "Files available." << std::endl;
+        for (auto i = 0; i < unique_file_count; i++) {
+            std::cout << "[" << i + 1 << "] " << 
+                unique_files[i].filename << " (from port " << unique_files[i].source_port << ")" << std::endl;
+        }
+        std::cout << "\n(Found files from " << seeds_found << " running port(s))" << std::endl;
+    }
+    pthread_mutex_unlock(&file_list_mutex);
+}
+
+void show_menu() {
+    auto choice = 0;
+    do {
+        std::cout << "\nSeed App\n";
+        std::cout << "[1] List available files.\n";
+        std::cout << "[2] Download file.\n";
+        std::cout << "[3] Download status.\n";
+        std::cout << "[4] Exit.\n";
+        std::cout << "\n ? ";
+
+        std::cin >> choice;
+        std::cout << "\n";
+
+        switch (choice) {
+            case 1:
+                listAvailableFiles();
+                break;
+            case 2:
+                download_file();
+                break;
+            case 3:
+                std::cout << "Checking download status..." << std::endl;
+                break;
+            case 4:
+                std::cout << "Exiting..." << std::endl;
+                break;
+            default:
+                std::cout << "Invalid choice. Please try again." << std::endl;
+        }
+    } while (choice != 4);
+}
+
+int main() {
+    bound_port_count = 0;
+    unique_file_count = 0;
+    my_bound_port = -1;
+    
+    // Start single port server
+    port_server();
+    
+    if (my_bound_port == -1) {
+        std::cout << "Could not bind to any port. Exiting." << std::endl;
+        return 1;
+    }
+    
+    show_menu();
+    
+    // Clean up
+    if (port_threads[0].is_bound && port_threads[0].socket_FileHandle >= 0) {
+        close(port_threads[0].socket_FileHandle);
+    }
+    
+    pthread_mutex_destroy(&file_list_mutex);
+    
+    return 0;
+}
