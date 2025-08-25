@@ -1,0 +1,41 @@
+### You're correct! The program only allows **one download at a time**. Here's why:
+
+**The limitation is enforced by this guard in `download_file()`:**
+
+```769:776:D:\C++\DraftCodes\atonce.cpp
+// Check if there's already an active download
+pthread_mutex_lock(&download_thread_mutex);
+if (active_download.is_active) {
+    std::cout << "A download is already in progress. Please wait for it to complete." << std::endl;
+    log_client("Download request rejected - another download already in progress");
+    pthread_mutex_unlock(&download_thread_mutex);
+    return;
+}
+```
+
+**Why only one download?**
+
+1. **Single global state**: There's only one `active_download` structure for the entire program
+2. **Shared progress tracking**: The status menu (option 3) reads from this single structure
+3. **Simplified thread management**: Only one background download thread to manage
+4. **Resource contention**: Multiple downloads could compete for the same seed connections
+
+**The current design:**
+- One `active_download` instance
+- One background download thread
+- One set of progress counters
+- One status display
+
+**To support multiple downloads, you'd need:**
+- An array/list of `download_thread_data_t` structures
+- Multiple background threads
+- A way to show status for each download separately
+- More complex seed connection management
+
+**Why it was designed this way:**
+- Simpler to implement and debug
+- Prevents overwhelming the seeds with too many simultaneous requests
+- Easier to track overall system state
+- Avoids complex thread synchronization issues
+
+So yes, you're limited to one download at a time. If you try to start a second download while one is running, you'll get the message "A download is already in progress. Please wait for it to complete."

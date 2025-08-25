@@ -1,0 +1,119 @@
+### Plan to support multiple simultaneous downloads
+
+- Add data structures
+  - Keep a list/vector of download tasks: one `download_thread_data_t` per file.
+  - Add a mutex for that list: `downloads_mutex`.
+  - Each task already has fields you need: `filename`, `available_seeds`, `thread_id`, `is_active`, `total_size`, `downloaded_bytes`, `total_chunks`, `completed_chunks`.
+
+- Update thread worker and core downloader
+  - Change `download_thread_worker(void*)` to accept a task pointer and operate only on that task.
+  - Change `download_file_round_robin(...)` to accept a `download_thread_data_t*` and update only that task’s fields.
+  - On completion, mark `task->is_active = false`, remove it from the global list, free task resources.
+
+- Change download start flow
+  - In `download_file()`, remove the single-download guard.
+  - For each “download” request:
+    - Create a new `download_thread_data_t` on heap.
+    - Copy `filename` and `available_seeds`.
+    - Initialize counters; push pointer into `active_downloads` under `downloads_mutex`.
+    - Start a new detached thread with `download_thread_worker(task)`.
+
+- Update status output
+  - Modify `show_download_status()` to:
+    - Lock `downloads_mutex`, iterate `active_downloads`.
+    - Print progress for each task: `filename`, `downloaded/total`, percentage.
+    - If empty, show “No active downloads.”
+
+- Remove single-download globals
+  - Delete global `active_download` and `download_thread_mutex`.
+  - Replace all references with per-task state and `downloads_mutex`.
+
+- Server protocol remains unchanged
+  - No changes needed to `LIST`, `FILESIZE`, `DOWNLOAD <filename>|<offset>` handlers.
+
+- Logging
+  - Keep existing logging; optionally include task/filename in all client logs to distinguish concurrent downloads.
+
+- Resource management
+  - Ensure each task frees `available_seeds` and closes its output file.
+  - On app exit, optionally wait for active tasks or warn and exit.
+
+- Safety and correctness
+  - Safety cap: keep per-task cap, or tie to `total_size` (e.g., chunk limit = ceil(total_size/CHUNK_SIZE) + margin).
+  - Consider raising `CHUNK_SIZE` to reduce connection overhead when many downloads run.
+
+- Optional improvements
+  - Status menu: allow selecting a task index to view details/cancel.
+  - Basic retry per chunk if a seed fails, try next seed for same offset.
+
+- Implementation order (incremental)
+  1) Add `active_downloads` and `downloads_mutex`.
+  2) Convert worker and round-robin to per-task signature.
+  3) Modify `download_file()` to create tasks/threads; remove single guard.
+  4) Update `show_download_status()`.
+  5) Remove old globals/references; build and test with two small files.
+  6) Tune safety cap and chunk size as needed.
+
+
+
+
+  ### Challenges and concerns when enabling multiple simultaneous downloads
+
+- Resource contention
+  - CPU context switching with many threads
+  - File I/O bottlenecks (writing multiple files concurrently)
+  - Network sockets exhaustion; ephemeral port limits
+
+- Seed overload and fairness
+  - Many downloads hitting the same seed increases latency/failures
+  - Need per-seed rate limiting or connection caps
+
+- Synchronization complexity
+  - Shared structures (downloads list, logs) need careful locking to avoid races/deadlocks
+  - Per-task progress updates must not block UI/status
+
+- Error handling and retries
+  - A failing seed for one task shouldn’t stall others
+  - Retry policy per-chunk per-task; avoid livelock across many tasks
+
+- Backpressure and pacing
+  - With 32-byte chunks, connection churn explodes across multiple downloads
+  - Consider larger chunk size and/or persistent connections to reduce overhead
+
+- Logging noise and diagnostics
+  - Interleaved logs from many tasks become hard to read
+  - Prefix logs with filename/task-id; consider per-task log files
+
+- User experience
+  - Status view must scale (paginate or summarize many tasks)
+  - Provide cancel/pause per task to control load
+
+- Safety limits
+  - Current “10,000 chunks” cap will prematurely stop large files faster with multiple tasks
+  - Replace with size-based limit and sane global caps (max concurrent downloads)
+
+- Disk layout and path management
+  - Concurrent directory creation; ensure idempotent mkdir and safe path building
+  - Handle name collisions (same filename from different seeds) deterministically
+
+- Clean shutdown
+  - Need to detach or join threads, flush/close files, and avoid leaking heap-allocated task objects
+
+- Testing complexity
+  - Race conditions only appear under load; add stress tests with multiple small files and seeds
+  - Simulate seed failures and partial availability
+
+- Security/protocol integrity
+  - More entry points increase surface for malformed responses
+  - Validate protocol responses strictly (e.g., check “SIZE:” and chunk lengths)
+
+- Future scalability
+  - Consider a simple scheduler: max N concurrent downloads, queue the rest
+  - Per-seed connection pool to amortize connects across chunks
+
+Recommended mitigations:
+- Increase CHUNK_SIZE (e.g., 4–32 KB) and/or keep connections open for multiple chunks.
+- Introduce a global limit (e.g., max 3 concurrent downloads) and per-seed caps.
+- Use a task ID, per-task logging, and a summarized status view.
+- Adopt per-task mutex-free updates with atomics for counters where possible; use one global mutex only for the task list.
+- Replace the chunk-count safety limit with size-based thresholds plus a small margin.
