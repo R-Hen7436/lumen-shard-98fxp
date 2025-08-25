@@ -1,0 +1,277 @@
+I'll explain the key functions and syntaxes related to listing and downloading files in the `SeedApp.cpp` code.
+
+## **File Listing Functions**
+
+### 1. `listAvailableFiles()`
+This is the main function for **Option 1** that discovers files from other running instances.
+
+```cpp
+void listAvailableFiles() {
+    // Reset file counter
+    pthread_mutex_lock(&file_list_mutex);
+    unique_file_count = 0;
+    pthread_mutex_unlock(&file_list_mutex);
+    
+    auto seeds_found = 0;
+    
+    // Try to connect to all other ports
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        auto port = PORTS[i];
+        if (port != my_bound_port) {  // Skip current bound port
+            // ... connection logic
+        }
+    }
+}
+```
+
+**Key Syntax Elements:**
+- **`auto`**: C++11 automatic type deduction
+- **`pthread_mutex_lock/unlock`**: Thread synchronization to prevent race conditions
+- **`for` loop with range**: Iterates through available ports (8080-8084)
+
+### 2. `add_unique_file()`
+Adds discovered files to the global list, preventing duplicates.
+
+```cpp
+void add_unique_file(const char* filename, int source_port) {
+    pthread_mutex_lock(&file_list_mutex);
+    
+    // Check for duplicates
+    for (auto i = 0; i < unique_file_count; i++) {
+        if (strcmp(unique_files[i].filename, filename) == 0) {
+            pthread_mutex_unlock(&file_list_mutex);
+            return;  // File already exists
+        }
+    }
+    
+    // Safe string copy with bounds checking
+    if (strlen(filename) < MAX_FILENAME_LENGTH) {
+        strncpy(unique_files[unique_file_count].filename, filename, MAX_FILENAME_LENGTH - 1);
+        unique_files[unique_file_count].filename[MAX_FILENAME_LENGTH - 1] = '\0'; // Ensure null termination
+        unique_files[unique_file_count].source_port = source_port;
+        unique_file_count++;
+    }
+    pthread_mutex_unlock(&file_list_mutex);
+}
+```
+
+**Key Syntax Elements:**
+- **`strcmp()`**: String comparison function
+- **`strncpy()`**: Safe string copy with length limit
+- **`MAX_FILENAME_LENGTH - 1`**: Buffer safety (leaving space for null terminator)
+
+## **Download Functions**
+
+### 3. `download_file()`
+Main function for **Option 2** that handles user input and initiates downloads.
+
+```cpp
+void download_file() {
+    pthread_mutex_lock(&file_list_mutex);
+    if (unique_file_count == 0) {
+        std::cout << "No files available to download. Please list files first (option 1)." << std::endl;
+        pthread_mutex_unlock(&file_list_mutex);
+        return;
+    }
+    
+    // Show available files
+    std::cout << "Available files for download:" << std::endl;
+    for (auto i = 0; i < unique_file_count; i++) {
+        std::cout << "[" << i + 1 << "] " << 
+               unique_files[i].filename << " (from seed at port " << unique_files[i].source_port << ")" << std::endl;
+    }
+    
+    // Get user's choice
+    std::cout << "\nEnter file ID: ";
+    auto file_choice = 0;
+    std::cin >> file_choice;
+    
+    // ... validation and download logic
+}
+```
+
+**Key Syntax Elements:**
+- **`std::cin >>`**: Input stream operator for user input
+- **Array indexing**: `unique_files[file_choice - 1]` (converting 1-based to 0-based)
+- **String concatenation**: Using `<<` operator with `std::cout`
+
+### 4. `scan_seeds_for_file()`
+Scans all available seeds to find which ones have the requested file.
+
+```cpp
+void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds) {
+    available_seeds.clear();  // Clear previous results
+    
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        auto port = PORTS[i];
+        if (port != my_bound_port) {  // Skip current port
+            std::cout << "Scanning seed at port " << port << "... ";
+            
+            // Create socket connection
+            auto sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) {
+                std::cout << "failed" << std::endl;
+                continue;
+            }
+            
+            // ... connection and file checking logic
+        }
+    }
+}
+```
+
+**Key Syntax Elements:**
+- **`std::vector<int>&`**: Reference to vector (no copying, direct modification)
+- **`available_seeds.clear()`**: Vector method to remove all elements
+- **`available_seeds.push_back(port)`**: Add port to vector
+- **`continue`**: Skip to next iteration in loop
+
+### 5. `download_file_round_robin()`
+Core download function that implements round-robin chunk distribution.
+
+```cpp
+void download_file_round_robin(const char* filename, const std::vector<int>& available_seeds) {
+    const int CHUNK_SIZE = 32;  // Fixed 32-byte chunks
+    auto total_seeds = available_seeds.size();
+    auto current_seed_index = 0;
+    
+    // Round-robin download loop
+    while (total_bytes_downloaded < estimated_total_size && active_seed_count > 0) {
+        auto current_seed_port = available_seeds[current_seed_index];
+        
+        // Skip finished seeds
+        if (seed_finished[current_seed_index]) {
+            current_seed_index = (current_seed_index + 1) % total_seeds;  // Round-robin
+            continue;
+        }
+        
+        // ... download logic for current seed
+        
+        // Move to next seed
+        current_seed_index = (current_seed_index + 1) % total_seeds;
+    }
+}
+```
+
+**Key Syntax Elements:**
+- **`%` operator**: Modulo for round-robin cycling through seeds
+- **`while` loop**: Continues until download complete or all seeds finished
+- **`continue`**: Skip to next iteration when seed is finished
+
+## **Network Communication Functions**
+
+### 6. Socket Communication Pattern
+Standard pattern used throughout the code:
+
+```cpp
+// Create socket
+auto sock = socket(AF_INET, SOCK_STREAM, 0);
+if (sock < 0) {
+    // Handle error
+    continue;
+}
+
+// Set up address structure
+struct sockaddr_in addr;
+addr.sin_family = AF_INET;
+addr.sin_port = htons(port);  // Convert port to network byte order
+inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);  // Convert IP string to binary
+
+// Connect
+if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+    // Send command
+    send(sock, "LIST", strlen("LIST"), 0);
+    
+    // Receive response
+    char buffer[1024];
+    auto n = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    if (n > 0) {
+        buffer[n] = '\0';  // Null-terminate received data
+        // Process response
+    }
+}
+
+// Always close socket
+close(sock);
+```
+
+**Key Syntax Elements:**
+- **`htons()`**: Host to network short (byte order conversion)
+- **`inet_pton()`**: Convert IP address string to binary format
+- **`send()/recv()`**: Socket I/O functions
+- **`buffer[n] = '\0'`**: Null-terminate received data for string operations
+
+### 7. File Operations
+Reading and writing files during download:
+
+```cpp
+// Create output file
+output_file = fopen(download_path, "wb");  // Binary write mode
+if (!output_file) {
+    // Handle error
+    return;
+}
+
+// Write chunk to file
+fwrite(chunk_buffer, 1, bytes_received, output_file);
+
+// Close file when done
+if (output_file) {
+    fclose(output_file);
+}
+```
+
+**Key Syntax Elements:**
+- **`"wb"`**: Binary write mode (overwrites existing file)
+- **`fwrite()`**: Write binary data to file
+- **`fclose()`**: Always close files to prevent resource leaks
+
+## **Data Structures**
+
+### 8. File Information Structure
+```cpp
+typedef struct {
+    char filename[MAX_FILENAME_LENGTH];  // Fixed-size character array
+    int source_port;                     // Port number where file was found
+} file_info_t;
+
+file_info_t unique_files[MAX_FILES];     // Global array of discovered files
+```
+
+**Key Syntax Elements:**
+- **`typedef struct`**: C-style structure definition
+- **Fixed-size arrays**: `char filename[256]` for predictable memory usage
+- **Global arrays**: `unique_files[MAX_FILES]` accessible from all functions
+
+### 9. Vector Usage
+```cpp
+std::vector<int> available_seeds;        // Dynamic array of port numbers
+available_seeds.clear();                 // Remove all elements
+available_seeds.push_back(port);         // Add element to end
+auto total_seeds = available_seeds.size(); // Get current size
+```
+
+**Key Syntax Elements:**
+- **`std::vector<int>`**: C++ standard library dynamic array
+- **`.clear()`**: Remove all elements
+- **`.push_back()`**: Add element to end
+- **`.size()`**: Get current number of elements
+
+## **Thread Safety**
+
+### 10. Mutex Usage
+```cpp
+pthread_mutex_t file_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Lock before accessing shared data
+pthread_mutex_lock(&file_list_mutex);
+// ... access shared data ...
+pthread_mutex_unlock(&file_list_mutex);
+```
+
+**Key Syntax Elements:**
+- **`PTHREAD_MUTEX_INITIALIZER`**: Static initialization macro
+- **`pthread_mutex_lock/unlock`**: Critical section protection
+- **Always unlock**: Prevents deadlocks
+
+This code demonstrates a robust peer-to-peer file sharing system with proper error handling, thread safety, and efficient network communication patterns.

@@ -126,36 +126,24 @@ int bind_and_listen(int port) {
     return sock;
 }
 
-// ===== HELPER FUNCTION: ADD UNIQUE FILE TO DISCOVERED LIST =====
-// This function prevents duplicate files from being added to the global file list
-// It uses thread-safe operations to maintain data integrity
 void add_unique_file(const char* filename, int source_port) {
-    // THREAD SAFETY: Lock mutex before accessing shared file list
     pthread_mutex_lock(&file_list_mutex);
     
-    // SYNTAX: for loop with array indexing - check for existing duplicates
     for (auto i = 0; i < unique_file_count; i++) {
-        // SYNTAX: strcmp() - string comparison function (returns 0 if equal)
         if (strcmp(unique_files[i].filename, filename) == 0) {
             pthread_mutex_unlock(&file_list_mutex);
-            return;  // SYNTAX: return - exit function early if duplicate found
+            return;
         }
     }
     
-    // SYNTAX: Check if we have room for more files
     if (unique_file_count < MAX_FILES) {
-        // SYNTAX: strlen() - get string length for bounds checking
         if (strlen(filename) < MAX_FILENAME_LENGTH) {
-            // SYNTAX: strncpy() - safe string copy with length limit
-            // SYNTAX: unique_file_count - array index for next available slot
             strncpy(unique_files[unique_file_count].filename, filename, MAX_FILENAME_LENGTH - 1);
-            // SYNTAX: Ensure null termination - critical for string safety
             unique_files[unique_file_count].filename[MAX_FILENAME_LENGTH - 1] = '\0';
             unique_files[unique_file_count].source_port = source_port;
-            unique_file_count++;  // SYNTAX: Increment counter for next file
+            unique_file_count++;
         }
     }
-    // THREAD SAFETY: Always unlock mutex before exiting function
     pthread_mutex_unlock(&file_list_mutex);
 }
 
@@ -405,32 +393,24 @@ void port_server() {
     std::cout << " No available ports found." << std::endl;
 }
 
-// ===== DOWNLOAD FUNCTION (OPTION 2) =====
-// This function handles user input and initiates the file download process
-// It validates user selection and prepares for round-robin download
 void download_file() {
-    // THREAD SAFETY: Lock mutex to safely access shared file list
     pthread_mutex_lock(&file_list_mutex);
     if (unique_file_count == 0) {
         std::cout << "No files available to download. Please list files first (option 1)." << std::endl;
         pthread_mutex_unlock(&file_list_mutex);
-        return;  // SYNTAX: return - exit function early
+        return;
     }
      
-    // SYNTAX: Display available files with numbered list
     std::cout << "Available files for download:" << std::endl;
     for (auto i = 0; i < unique_file_count; i++) {
-        // SYNTAX: std::cout with << operator - string concatenation for display
         std::cout << "[" << i + 1 << "] " << 
                unique_files[i].filename << " (from seed at port " << unique_files[i].source_port << ")" << std::endl;
     }
      
-    // SYNTAX: User input using std::cin with >> operator
     std::cout << "\nEnter file ID: ";
     auto file_choice = 0;
-    std::cin >> file_choice;  // SYNTAX: std::cin >> - reads integer from user
+    std::cin >> file_choice;
      
-    // SYNTAX: Input validation - check if choice is within valid range
     if (file_choice < 1 || file_choice > unique_file_count) {
         std::cout << "Locating seeders... Failed" << std::endl;
         std::cout << "No seeders for file ID " << file_choice << "." << std::endl;
@@ -438,41 +418,34 @@ void download_file() {
         return;
     }
      
-    // SYNTAX: Safe string copying with bounds checking
     char filename[MAX_FILENAME_LENGTH];
-    size_t filename_len = strlen(unique_files[file_choice - 1].filename);  // SYNTAX: strlen() - get string length
+    size_t filename_len = strlen(unique_files[file_choice - 1].filename);
     if (filename_len < MAX_FILENAME_LENGTH) {
-        // SYNTAX: strncpy() - safe string copy with length limit
-        // SYNTAX: file_choice - 1 - convert 1-based user input to 0-based array index
         strncpy(filename, unique_files[file_choice - 1].filename, MAX_FILENAME_LENGTH - 1);
-        filename[MAX_FILENAME_LENGTH - 1] = '\0';  // SYNTAX: Ensure null termination
+        filename[MAX_FILENAME_LENGTH - 1] = '\0';
     } else {
         std::cout << "Error: Filename too long." << std::endl;
         pthread_mutex_unlock(&file_list_mutex);
         return;
     }
-    pthread_mutex_unlock(&file_list_mutex);  // Release mutex after accessing shared data
+    pthread_mutex_unlock(&file_list_mutex);
      
     std::cout << "Scanning all seeds for file '" << filename << "'..." << std::endl;
      
-    // SYNTAX: std::vector<int> - C++ dynamic array for storing available seed ports
     std::vector<int> available_seeds;
-    scan_seeds_for_file(filename, available_seeds);  // Call function to find seeds with this file
+    scan_seeds_for_file(filename, available_seeds);
      
-    // SYNTAX: .empty() - vector method to check if no seeds found
     if (available_seeds.empty()) {
         std::cout << "No seeds found with file '" << filename << "'. Cannot download." << std::endl;
         return;
     }
      
-    // SYNTAX: Get file size from first available seed for progress estimation
     auto expected_size = get_file_size_from_seed(available_seeds[0], filename);
     if (expected_size <= 0) {
         std::cout << "Could not determine file size. Download may fail." << std::endl;
     } else {
         std::cout << "Expected file size: " << expected_size << " bytes" << std::endl;
          
-        // SYNTAX: Check if file already exists locally to avoid re-downloading
         char existing_path[1024];
         if (check_file_already_exists(filename, expected_size, existing_path, sizeof(existing_path))) {
             std::cout << " File [" << file_choice << "] " << filename << " already exists" << std::endl;
@@ -483,69 +456,53 @@ void download_file() {
     }
      
     std::cout << "Starting download for file: " << filename << std::endl;
-    // SYNTAX: Call the core download function with round-robin chunk distribution
     download_file_round_robin(filename, available_seeds);
 }
 
-// ===== HELPER FUNCTION: SCAN SEEDS FOR SPECIFIC FILE =====
-// This function checks which seeds have the requested file available for download
-// It's called before starting a download to identify available sources
 void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds) {
-    // SYNTAX: .clear() - vector method to remove all previous results
     available_seeds.clear();
     
-    // SYNTAX: for loop - scan all available ports for the specific file
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
-        if (port != my_bound_port) {  // Skip current instance's port
+        if (port != my_bound_port) {
             std::cout << "Scanning seed at port " << port << "... ";
             
-            // NETWORK SYNTAX: socket() - create TCP socket for connection
             auto sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock < 0) {
                 std::cout << "failed" << std::endl;
-                continue;  // SYNTAX: continue - skip to next port on socket failure
+                continue;
             }
             
-            // NETWORK SYNTAX: sockaddr_in structure setup for connection
             struct sockaddr_in addr;
-            addr.sin_family = AF_INET;  // IPv4 family
-            addr.sin_port = htons(port);  // SYNTAX: htons() - convert port to network byte order
-            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);  // SYNTAX: inet_pton() - convert IP string to binary
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(port);
+            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
             
-            // NETWORK SYNTAX: connect() - establish TCP connection to seed
             if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-                // NETWORK SYNTAX: send() - request file list from this seed
                 send(sock, "LIST", strlen("LIST"), 0);
                 
-                // NETWORK SYNTAX: recv() - receive file list response
                 char buffer[1024];
                 auto n = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (n > 0) {
-                    buffer[n] = '\0';  // SYNTAX: Null-terminate received data
+                    buffer[n] = '\0';
                     
-                    // STRING PARSING SYNTAX: strtok() - parse response line by line
                     char* line = strtok(buffer, "\n");
-                    bool file_found = false;  // SYNTAX: bool - C++ boolean type
-                    
-                    // SYNTAX: while loop with NULL check - process each line
+                    bool file_found = false;
                     while (line != NULL) {
-                        auto bracket_end = strchr(line, ']');  // SYNTAX: strchr() - find ']' character
+                        auto bracket_end = strchr(line, ']');
                         if (bracket_end && bracket_end[1] == ' ') {
-                            auto seed_filename = bracket_end + 2;  // SYNTAX: Pointer arithmetic to skip "[X] "
-                            // SYNTAX: strcmp() - compare filenames for exact match
+                            auto seed_filename = bracket_end + 2;
                             if (strcmp(seed_filename, filename) == 0) {
                                 file_found = true;
-                                break;  // SYNTAX: break - exit loop when file found
+                                break;
                             }
                         }
-                        line = strtok(NULL, "\n");  // SYNTAX: strtok(NULL, ...) - continue tokenization
+                        line = strtok(NULL, "\n");
                     }
                     
-                    // SYNTAX: Conditional output based on search result
                     if (file_found) {
                         std::cout << "found" << std::endl;
-                        available_seeds.push_back(port);  // SYNTAX: .push_back() - add port to vector
+                        available_seeds.push_back(port);
                     } else {
                         std::cout << "not found" << std::endl;
                     }
@@ -556,12 +513,10 @@ void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds
                 std::cout << "not running" << std::endl;
             }
             
-            // NETWORK SYNTAX: close() - always close socket to prevent resource leaks
             close(sock);
         }
     }
     
-    // SYNTAX: .size() - display total number of seeds found with this file
     std::cout << "Found " << available_seeds.size() << " seed(s) with file '" << filename << "'" << std::endl;
 }
 
@@ -862,62 +817,48 @@ long long get_file_size_from_seed(int port, const char* filename) {
     return 1024 * 1024;
 }
 
-// ===== FILE LISTING FUNCTION (OPTION 1) =====
-// This function implements the core file discovery mechanism
-// It scans all available ports to find running seed instances and their files
 void listAvailableFiles() {
     std::cout << "\nSearching for files... " << std::endl;
     
-    // THREAD SAFETY: Lock mutex before accessing shared file list data
-    // SYNTAX: pthread_mutex_lock() - prevents race conditions when multiple threads access unique_files array
     pthread_mutex_lock(&file_list_mutex);
-    unique_file_count = 0;  // Reset file counter for new search
+    unique_file_count = 0;
     pthread_mutex_unlock(&file_list_mutex);
     
-    auto seeds_found = 0;  // SYNTAX: auto - C++11 automatic type deduction for int
+    auto seeds_found = 0;
     
-    // SYNTAX: for loop with range - iterates through all available ports (8080-8084)
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
-        if (port != my_bound_port) {  // Skip current instance's port
+        if (port != my_bound_port) {
             std::cout << "Trying to connect to port " << port << " ";
             
-            // NETWORK SYNTAX: socket() - creates TCP socket for connection
-            // AF_INET = IPv4, SOCK_STREAM = TCP protocol
             auto sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock < 0) {
                 std::cout << "socket failed" << std::endl;
-                continue;  // SYNTAX: continue - skip to next iteration
+                continue;
             }
             
-            // NETWORK SYNTAX: sockaddr_in structure setup
             struct sockaddr_in addr;
-            addr.sin_family = AF_INET;  // IPv4 family
-            addr.sin_port = htons(port);  // SYNTAX: htons() - converts port to network byte order
-            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);  // SYNTAX: inet_pton() - converts IP string to binary
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(port);
+            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
             
-            // NETWORK SYNTAX: connect() - establishes TCP connection to seed
             if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-                // NETWORK SYNTAX: send() - sends "LIST" command to request file list
                 send(sock, "LIST", strlen("LIST"), 0);
                 
-                // NETWORK SYNTAX: recv() - receives file list response
                 char buffer[1024];
                 auto n = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (n > 0) {
-                    buffer[n] = '\0';  // SYNTAX: Null-terminate received data for string operations
+                    buffer[n] = '\0';
                     std::cout << "connected, found files" << std::endl;
                     seeds_found++;
                     
-                    // STRING PARSING SYNTAX: strtok() - tokenizes response by newlines
                     auto line = strtok(buffer, "\n");
-                    while (line != NULL) {  // SYNTAX: while loop with NULL check
-                        auto bracket_end = strchr(line, ']');  // SYNTAX: strchr() - finds ']' character
+                    while (line != NULL) {
+                        auto bracket_end = strchr(line, ']');
                         if (bracket_end && bracket_end[1] == ' ') {
-                            // SYNTAX: bracket_end + 2 - pointer arithmetic to skip "[X] " prefix
                             add_unique_file(bracket_end + 2, port);
                         }
-                        line = strtok(NULL, "\n");  // SYNTAX: strtok(NULL, ...) - continues tokenization
+                        line = strtok(NULL, "\n");
                     }
                 } else {
                     std::cout << "no response" << std::endl;
@@ -926,23 +867,19 @@ void listAvailableFiles() {
                 std::cout << "not running" << std::endl;
             }
             
-            // NETWORK SYNTAX: close() - always close socket to prevent resource leaks
             close(sock);
         }
     }
     
     std::cout << "done." << std::endl;
     
-    // THREAD SAFETY: Lock mutex again to display results
     pthread_mutex_lock(&file_list_mutex);
     if (unique_file_count == 0) {
         std::cout << "No files found from port instances." << std::endl;
         std::cout << "(No other instances appear to be running)" << std::endl;
     } else {
         std::cout << "Files available." << std::endl;
-        // SYNTAX: for loop with array indexing - displays all discovered files
         for (auto i = 0; i < unique_file_count; i++) {
-            // SYNTAX: std::cout with << operator - string concatenation and output
             std::cout << "[" << i + 1 << "] " << 
                 unique_files[i].filename << " (from port " << unique_files[i].source_port << ")" << std::endl;
         }
@@ -951,70 +888,53 @@ void listAvailableFiles() {
     pthread_mutex_unlock(&file_list_mutex);
 }
 
-// ===== MAIN MENU FUNCTION =====
-// This function displays the user interface and handles user input
-// It implements a simple menu-driven interface for the file sharing application
 void show_menu() {
-    auto choice = 0;  // SYNTAX: auto - automatic type deduction for int
-    
-    // SYNTAX: do-while loop - ensures menu is displayed at least once
+    auto choice = 0;
     do {
-        // SYNTAX: std::cout with << operator - display menu options
         std::cout << "\nSeed App me\n";
         std::cout << "[1] List available files.\n";
         std::cout << "[2] Download file.\n";
         std::cout << "[3] Exit.\n";
         std::cout << "\n ? ";
 
-        // SYNTAX: std::cin with >> operator - read user input
         std::cin >> choice;
         std::cout << "\n";
 
-        // SYNTAX: switch statement - handle different menu choices
         switch (choice) {
             case 1:
-                listAvailableFiles();  // SYNTAX: Function call - execute file listing
-                break;  // SYNTAX: break - exit switch statement
+                listAvailableFiles();
+                break;
             case 2:
-                download_file();       // SYNTAX: Function call - execute file download
+                download_file();
                 break;
             case 3:
                 std::cout << "Exiting..." << std::endl;
                 break;
-            default:  // SYNTAX: default - handle invalid input
+            default:
                 std::cout << "Invalid choice. Please try again." << std::endl;
         }
-    } while (choice != 3);  // SYNTAX: while condition - continue until user chooses exit
+    } while (choice != 3);
 }
 
-// ===== MAIN FUNCTION - APPLICATION ENTRY POINT =====
-// This function initializes the application, starts the server, and runs the main loop
-// It handles cleanup when the application exits
 int main() {
-    // SYNTAX: Initialize global variables to safe default values
-    bound_port_count = 0;      // No ports bound yet
-    unique_file_count = 0;     // No files discovered yet
-    my_bound_port = -1;        // No port assigned yet
+    bound_port_count = 0;
+    unique_file_count = 0;
+    my_bound_port = -1;
     
-    // SYNTAX: Function call - start the port server to bind to an available port
     port_server();
     
-    // SYNTAX: Error checking - ensure we successfully bound to a port
     if (my_bound_port == -1) {
         std::cout << "Could not bind to any port. Exiting." << std::endl;
-        return 1;  // SYNTAX: return 1 - indicate error exit code
+        return 1;
     }
     
-    // SYNTAX: Function call - start the main application menu loop
     show_menu();
     
-    // SYNTAX: Cleanup - close socket before exiting
     if (port_threads[0].is_bound && port_threads[0].socket_FileHandle >= 0) {
-        close(port_threads[0].socket_FileHandle);  // SYNTAX: close() - close network socket
+        close(port_threads[0].socket_FileHandle);
     }
     
-    // SYNTAX: pthread_mutex_destroy() - cleanup thread synchronization resources
     pthread_mutex_destroy(&file_list_mutex);
     
-    return 0;  // SYNTAX: return 0 - indicate successful exit
+    return 0;
 }
