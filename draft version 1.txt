@@ -57,29 +57,6 @@ void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds
 void roundrobin_download(const char* filename, const std::vector<int>& available_seeds);
 long long get_file_size_from_seed(int port, const char* filename);
 bool check_file_already_exists(const char* filename, long long expected_size, char* existing_path, size_t path_size);
-void parallel_download(const char* filename, const std::vector<int>& available_seeds);
-
-// Data for parallel download workers
-typedef struct {
-    const char* filename;
-    std::vector<int> seeds;
-    int chunk_size;
-    long long total_size;
-    int my_folder_id;
-    char download_path[1024];
-    int first_source_folder_id;
-    int fd; // POSIX file descriptor for pwrite
-    pthread_mutex_t queue_mutex;
-    long long next_offset; // next offset to claim
-    long long bytes_downloaded;
-    int chunks_downloaded;
-    bool stop;
-} parallel_ctx_t;
-
-typedef struct {
-    parallel_ctx_t* ctx;
-    int seed_index;
-} worker_arg_t;
 
 void setup_socket_addr(struct sockaddr_in* addr, int port) {
     memset(addr, 0, sizeof(*addr));
@@ -478,8 +455,7 @@ void download_file() {
     }
      
     std::cout << "Starting download for file: " << filename << std::endl;
-    parallel_download(filename, available_seeds);
-    // roundrobin_download(filename, available_seeds);
+    roundrobin_download(filename, available_seeds);
 }
 
 void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds) {
@@ -885,176 +861,6 @@ long long get_file_size_from_seed(int port, const char* filename) {
     
     // Fallback when size cannot be determined from the seed.
     return 1024 * 1024;
-}
-
-// Parallel downloader using pthreads. Spawns one worker per seed.
-// Each worker repeatedly claims the next 32-byte block (from a shared offset),
-// requests it from its assigned seed, then writes it to the correct place in
-// the destination file using pwrite (so workers don't seek over each other).
-void parallel_download(const char* filename, const std::vector<int>& available_seeds) {
-    if (available_seeds.empty()) {
-        std::cout << "No seed available for this file." << std::endl;
-        return;
-    }
-
-    const int CHUNK_SIZE = 32;
-    auto total_seeds = (int)available_seeds.size();
-
-    // Resolve my folder id (used to build the destination path)
-    auto my_folder_id = -1;
-    for (auto i = 0; i < MAX_PORTS; i++) {
-        if (PORTS[i] == my_bound_port) { my_folder_id = i + 1; break; }
-    }
-    if (my_folder_id == -1) {
-        std::cout << "Error: Could not determine local folder." << std::endl;
-        return;
-    }
-
-    // Determine first_source_folder_id based on the first seed (for path organization)
-    // This preserves the existing folder layout: files/seed<me>/<me>/<source>/<file>
-    auto first_source_folder_id = -1;
-    for (auto i = 0; i < MAX_PORTS; i++) {
-        if (PORTS[i] == available_seeds[0]) { first_source_folder_id = i + 1; break; }
-    }
-    if (first_source_folder_id == -1) {
-        std::cout << "Error: Could not determine folder ID for port " << available_seeds[0] << std::endl;
-        return;
-    }
-
-    // Determine total size (fallback to 10KB). Pre-sizing helps allow out-of-order writes.
-    auto total_size = get_file_size_from_seed(available_seeds[0], filename);
-    if (total_size <= 0) {
-        total_size = CHUNK_SIZE * 320; // 10 KB fallback
-    }
-
-    // Prepare destination path and file
-    char download_dir[1024];
-    snprintf(download_dir, sizeof(download_dir), "files/seed%d/%d/%d", my_folder_id, my_folder_id, first_source_folder_id);
-    if (create_directory(download_dir) != 0) {
-        std::cout << "Warning: Could not create directory " << download_dir << std::endl;
-    }
-    char download_path[1024];
-    auto path_result = snprintf(download_path, sizeof(download_path), "%s/%s", download_dir, filename);
-    if (path_result >= (int)sizeof(download_path)) {
-        std::cout << "Error: File path too long, cannot download." << std::endl;
-        return;
-    }
-
-    // Open file descriptor for parallel writes
-    int fd = ::open(download_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd < 0) {
-        std::cout << "Failed to create output file: " << download_path << std::endl;
-        return;
-    }
-    // Pre-allocate/truncate to expected size to allow out-of-order writes
-    if (ftruncate(fd, total_size) != 0) {
-        // Not fatal; we'll still write sequentially by offsets
-    }
-
-    std::cout << "Starting PARALLEL download from " << total_seeds << " seeds..." << std::endl;
-    std::cout << "Target size: " << total_size << " bytes in " << ((total_size + CHUNK_SIZE - 1) / CHUNK_SIZE) << " chunks" << std::endl;
-
-    // Shared context
-    parallel_ctx_t ctx{};
-    ctx.filename = filename;
-    ctx.seeds = available_seeds;
-    ctx.chunk_size = CHUNK_SIZE;
-    ctx.total_size = total_size;
-    ctx.my_folder_id = my_folder_id;
-    ctx.first_source_folder_id = first_source_folder_id;
-    ctx.fd = fd;
-    ctx.next_offset = 0;
-    ctx.bytes_downloaded = 0;
-    ctx.chunks_downloaded = 0;
-    ctx.stop = false;
-    pthread_mutex_init(&ctx.queue_mutex, NULL);
-
-    // Per-seed chunk counters for summary (can be extended to print a per-seed table)
-    std::vector<int> chunks_per_seed(total_seeds, 0);
-
-    // Worker function (lambda converted to static for C++)
-    // Worker thread: claim next offset, fetch from its seed, write with pwrite
-    auto worker_fn = [](void* arg) -> void* {
-        worker_arg_t* w = (worker_arg_t*)arg;
-        parallel_ctx_t* c = w->ctx;
-        int seed_idx = w->seed_index;
-        int seed_port = c->seeds[seed_idx];
-        delete w;
-
-        std::cout << "[worker] start port " << seed_port << ", tid " << (unsigned long)pthread_self() << std::endl;
-        int local_chunks = 0;
-        while (true) {
-            // Claim next offset from the shared queue (32-byte blocks)
-            pthread_mutex_lock(&c->queue_mutex);
-            if (c->stop || c->next_offset >= c->total_size) {
-                pthread_mutex_unlock(&c->queue_mutex);
-                break;
-            }
-            long long offset = c->next_offset;
-            c->next_offset += c->chunk_size;
-            pthread_mutex_unlock(&c->queue_mutex);
-
-            // Connect to seed
-            int sock = socket(AF_INET, SOCK_STREAM, 0);
-            if (sock < 0) { continue; }
-            struct sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_port = htons(seed_port); inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-            if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) { close(sock); continue; }
-
-            // Send request for this offset
-            char request[512];
-            snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", c->filename, offset);
-            send(sock, request, strlen(request), 0);
-
-            // Read up to chunk_size (short read implies EOF for that seed at this offset)
-            std::vector<char> buf(c->chunk_size);
-            int total_read = 0;
-            while (total_read < c->chunk_size) {
-                int n = recv(sock, buf.data() + total_read, c->chunk_size - total_read, 0);
-                if (n <= 0) break;
-                total_read += n;
-            }
-            close(sock);
-
-            if (total_read > 0) {
-                // Write at offset
-                ssize_t written = pwrite(c->fd, buf.data(), total_read, offset);
-                (void)written; // ignore short writes for simplicity
-                // Update shared counters for final summary
-                pthread_mutex_lock(&c->queue_mutex);
-                c->bytes_downloaded += total_read;
-                c->chunks_downloaded += 1;
-                pthread_mutex_unlock(&c->queue_mutex);
-                local_chunks += 1;
-                // Track per-seed count (not locked strictly, minor race acceptable for stats)
-                // We'll accept occasional lost increments due to no lock to keep it simple
-            } else {
-                // If no data, it's likely EOF on this seed at this offset; keep going with other offsets
-            }
-        }
-        std::cout << "[worker] exit  port " << seed_port << ", tid " << (unsigned long)pthread_self() << ", chunks=" << local_chunks << std::endl;
-        return NULL;
-    };
-
-    // Launch one thread per seed (not per chunk). Each worker will claim many chunks.
-    std::vector<pthread_t> tids(total_seeds);
-    std::cout << "Launching " << total_seeds << " download worker thread(s)..." << std::endl;
-    for (int i = 0; i < total_seeds; i++) {
-        worker_arg_t* w = new worker_arg_t{ &ctx, i };
-        pthread_create(&tids[i], NULL, worker_fn, w);
-    }
-
-    // Join threads: wait for all workers to finish
-    for (int i = 0; i < total_seeds; i++) {
-        pthread_join(tids[i], NULL);
-    }
-
-    // Finish
-    ::close(fd);
-    pthread_mutex_destroy(&ctx.queue_mutex);
-
-    std::cout << "Parallel download completed!" << std::endl;
-    std::cout << "Total bytes downloaded: " << ctx.bytes_downloaded << std::endl;
-    std::cout << "File saved to: " << download_path << std::endl;
 }
 
 void listAvailableFiles() {

@@ -1,0 +1,66 @@
+### Big picture
+- A single process acts as both a seed server (serving files) and a client (listing and downloading from other seeds on localhost ports 8080–8084).
+- Files are stored under a per-port folder structure: `files/seed<me>/<me>/...`.
+
+### Startup
+- `main()` calls `port_server()` to bind to the first available port in `PORTS`.
+- On success, it starts a `server_thread` that accepts connections and handles requests.
+- Then it shows a menu: list files, download file, show status, exit.
+
+### Server side (what your seed serves)
+Handled by `port_request()` per client connection:
+- `LIST`: returns your own files under `files/seed<me>/<me>`.
+- `FILESIZE <filename>`: seeks to end and returns `SIZE:<bytes>` if exists.
+- `DOWNLOAD <filename>|<offset>`: opens file, seeks to `offset`, reads up to 32 bytes, sends them.
+
+### Listing files (client view)
+- `listAvailableFiles()` connects to every other port.
+- Sends `LIST`, prints “connected, found files” per running port, and parses each line to collect unique filenames with source ports.
+
+### Choosing and scanning for a file
+- `download_file()` shows the aggregated unique files and asks for an ID.
+- Copies the chosen filename, then calls `scan_seeds_for_file(filename, available_seeds)`:
+  - For each other port, sends `LIST`, parses each line, and if the filename matches, adds that port to `available_seeds`.
+- It tries `get_file_size_from_seed(first_seed, filename)`; on success prints expected size and checks if a matching-size copy already exists locally.
+
+### Downloading (round-robin)
+- `roundrobin_download(filename, available_seeds)`:
+  - Uses fixed `CHUNK_SIZE = 32` bytes.
+  - Determines `my_folder_id` from your bound port.
+  - If `get_file_size_from_seed` failed, sets a 10 KB cap: `320 × 32`.
+  - Tracks per-seed finished flags and per-seed chunk counts.
+
+Loop per rotation:
+1. Pick the current seed by index; skip if already finished.
+2. Connect to `127.0.0.1:<seed_port>`.
+3. Send `DOWNLOAD <filename>|<total_bytes_downloaded>` (global offset).
+4. Receive up to 32 bytes.
+   - If starts with `ERROR:`: log, rotate to next seed, count consecutive errors (break if too many).
+   - On first successful data: resolve source folder id, create `files/seed<me>/<me>/<source>`, open `download_path`.
+   - Write bytes; advance `total_bytes_downloaded` and `chunk_count`.
+   - If short chunk (<32): mark this seed finished and decrement `active_seed_count`.
+5. Stop when:
+   - `total_bytes_downloaded >= estimated_total_size`, or
+   - `active_seed_count == 0`, or
+   - `chunk_count > 10000` (safety).
+6. Between seeds: `usleep(CHUNK_DELAY_MICROSECONDS)`.
+
+### After download
+- If any data written, prints:
+  - Total bytes, total chunks, saved path.
+  - Per-seed chunk distribution with `std::fixed << setprecision(1)`.
+  - Verification that per-seed chunks sum to total.
+- Else: prints failure and removes the path.
+
+### Directory and naming
+- Your bound port determines `my_folder_id = index+1` in `PORTS`.
+- Download path is `files/seed<me>/<me>/<first_source_folder_id>/<filename>`.
+- Buffer-safe `snprintf` checks guard path lengths.
+
+### Error handling and guards
+- Falls back to 10 KB cap if size is unknown.
+- EOF detection via short chunk or `recv` 0.
+- Skips dead seeds; breaks on too many consecutive error replies.
+- Safety stop at 10,000 chunks to avoid infinite loops.
+
+If you want, I can add a short top-of-file comment summarizing this flow for future readers.

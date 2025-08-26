@@ -1,0 +1,258 @@
+10KB
+
+
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        if (PORTS[i] == my_bound_port) {
+            my_folder_id = i + 1;
+            break;
+        }
+    }
+    
+    if (my_folder_id == -1) {
+        std::cout << "Error: Could not determine local folder." << std::endl;
+        return;
+    }
+    
+    char download_dir[1024];
+    char download_path[1024];
+    FILE *output_file = nullptr;
+    int first_source_folder_id = -1;
+    
+    std::cout << "Starting round-robin download from " << total_seeds << " seeds..." << std::endl;
+    std::cout << "Downloading in " << CHUNK_SIZE << "-byte chunks..." << std::endl;
+    
+    auto total_bytes_downloaded = 0LL;
+    auto chunk_count = 0;
+    auto estimated_total_size = get_file_size_from_seed(available_seeds[0], filename);
+    
+    if (estimated_total_size <= 0) {
+        estimated_total_size = CHUNK_SIZE * 100;
+    }
+    
+    std::vector<bool> seed_finished(total_seeds, false);
+    std::vector<int> chunks_per_seed(total_seeds, 0);
+    int active_seed_count = total_seeds;
+    
+    while (total_bytes_downloaded < estimated_total_size && active_seed_count > 0) {
+        auto current_seed_port = available_seeds[current_seed_index];
+        
+        if (seed_finished[current_seed_index]) {
+            current_seed_index = (current_seed_index + 1) % total_seeds;
+            continue;
+        }
+        
+        auto sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) {
+            current_seed_index = (current_seed_index + 1) % total_seeds;
+            continue;
+        }
+        
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(current_seed_port);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+            close(sock);
+            current_seed_index = (current_seed_index + 1) % total_seeds;
+            continue;
+        }
+        
+        char request[512];
+        snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", filename, total_bytes_downloaded);
+        send(sock, request, strlen(request), 0);
+        
+        char chunk_buffer[CHUNK_SIZE];
+        auto total_chunk_bytes = 0;
+        
+        while (total_chunk_bytes < CHUNK_SIZE) {
+            auto bytes = recv(sock, chunk_buffer + total_chunk_bytes, CHUNK_SIZE - total_chunk_bytes, 0);
+            if (bytes <= 0) {
+                break;
+            }
+            total_chunk_bytes += bytes;
+        }
+        
+        auto bytes_received = total_chunk_bytes;
+        
+        if (bytes_received > 0) {
+            if (strncmp(chunk_buffer, "ERROR:", 6) == 0) {
+                if (total_bytes_downloaded < estimated_total_size) {
+                    std::cout << "Seed error from port " << current_seed_port << ": " << std::string(chunk_buffer, bytes_received) << std::endl;
+                }
+                close(sock);
+                current_seed_index = (current_seed_index + 1) % total_seeds;
+                
+                static int consecutive_errors = 0;
+                consecutive_errors++;
+                if (consecutive_errors >= total_seeds * 2) {
+                    break;
+                }
+                continue;
+            }
+            
+            if (chunk_count == 0) {
+                for (auto i = 0; i < MAX_PORTS; i++) {
+                    if (PORTS[i] == current_seed_port) {
+                        first_source_folder_id = i + 1;
+                        break;
+                    }
+                }
+                
+                if (first_source_folder_id == -1) {
+                    std::cout << "Error: Could not determine folder ID for port " << current_seed_port << std::endl;
+                    close(sock);
+                    return;
+                }
+                
+                snprintf(download_dir, sizeof(download_dir), "files/seed%d/%d/%d", 
+                         my_folder_id, my_folder_id, first_source_folder_id);
+                
+                if (create_directory(download_dir) != 0) {
+                    std::cout << "Warning: Could not create directory " << download_dir << std::endl;
+                }
+                
+                auto path_result = snprintf(download_path, sizeof(download_path), "%s/%s", download_dir, filename);
+                
+                if (path_result >= sizeof(download_path)) {
+                    std::cout << "Error: File path too long, cannot download." << std::endl;
+                    close(sock);
+                    return;
+                }
+                
+                output_file = fopen(download_path, "wb");
+                if (!output_file) {
+                    std::cout << "Failed to create output file: " << download_path << std::endl;
+                    close(sock);
+                    return;
+                }
+                
+                std::cout << "First chunk from seed at port " << current_seed_port << " (folder ID " << first_source_folder_id << ")" << std::endl;
+            }
+            
+            fwrite(chunk_buffer, 1, bytes_received, output_file);
+            total_bytes_downloaded += bytes_received;
+            chunk_count++;
+            
+            if (bytes_received < CHUNK_SIZE) {
+                chunks_per_seed[current_seed_index]++;
+                std::cout << "Port " << current_seed_port << " finished sending data (sent " << bytes_received << " bytes in final chunk) [Total chunks from this seed: " << chunks_per_seed[current_seed_index] << "]" << std::endl;
+                seed_finished[current_seed_index] = true;
+                active_seed_count--;
+                
+                if (active_seed_count == 0 || total_bytes_downloaded >= estimated_total_size) {
+                    std::cout << "End of file detected. Final size: " << total_bytes_downloaded << " bytes" << std::endl;
+                    break;
+                }
+            } else {
+                chunks_per_seed[current_seed_index]++;
+                std::cout << "Port " << current_seed_port << " sent 32-byte chunk (" << chunk_count << ") [Total from this seed: " << chunks_per_seed[current_seed_index] << "]" << std::endl;
+            }
+            
+            if (total_bytes_downloaded >= estimated_total_size) {
+                std::cout << "Download completed. Final size: " << total_bytes_downloaded << " bytes" << std::endl;
+                break;
+            }
+            
+            if (chunk_count > 10000) {
+                std::cout << "Safety limit reached. Stopping download at " << total_bytes_downloaded << " bytes" << std::endl;
+                break;
+            }
+            
+        } else {
+            std::cout << "Port " << current_seed_port << " has no more data to send" << std::endl;
+            seed_finished[current_seed_index] = true;
+            active_seed_count--;
+            
+            close(sock);
+            current_seed_index = (current_seed_index + 1) % total_seeds;
+            
+            if (active_seed_count == 0) {
+                std::cout << "All seeds have finished sending data. Download complete." << std::endl;
+                break;
+            }
+            continue;
+        }
+        
+        close(sock);
+        current_seed_index = (current_seed_index + 1) % total_seeds;
+        usleep(CHUNK_DELAY_MICROSECONDS);
+    }
+    
+    if (output_file) {
+        fclose(output_file);
+    }
+    
+    if (total_bytes_downloaded > 0) {
+        std::cout << "Round-robin download completed!" << std::endl;
+        std::cout << "Total bytes downloaded: " << total_bytes_downloaded << std::endl;
+        std::cout << "Total chunks downloaded: " << chunk_count << std::endl;
+        std::cout << "File saved to: " << download_path << std::endl;
+        
+        std::cout << "Chunk Distribution by Seed:" << std::endl;
+        int total_chunks_check = 0;
+        for (size_t i = 0; i < total_seeds; i++) {
+            if (chunks_per_seed[i] > 0) {
+                auto port = available_seeds[i];
+                auto percentage = (chunks_per_seed[i] * 100.0) / chunk_count;
+                std::cout << "  Port " << port << ": " << chunks_per_seed[i] << " chunks (" 
+                   << std::fixed << std::setprecision(1) << percentage << "%)" << std::endl;
+                total_chunks_check += chunks_per_seed[i];
+            }
+        }
+        std::cout << " Verification: " << total_chunks_check << "/" << chunk_count << " chunks accounted for" << std::endl;
+    } else {
+        std::cout << "\nDownload failed - no data received." << std::endl;
+        remove(download_path);
+    }
+}
+
+bool check_file_already_exists(const char* filename, long long expected_size, char* existing_path, size_t path_size) {
+    auto my_folder_id = -1;
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        if (PORTS[i] == my_bound_port) {
+            my_folder_id = i + 1;
+            break;
+        }
+    }
+    
+    if (my_folder_id == -1) {
+        return false;
+    }
+    
+    const char* possible_paths[] = {
+        "files/seed%d/%d/%s",
+        "files/seed%d/%d/1/%s",
+        "files/seed%d/%d/2/%s",
+        "files/seed%d/%d/3/%s",
+
+    pthread_mutex_lock(&file_list_mutex);
+    if (unique_file_count == 0) {
+        std::cout << "No files found from port instances." << std::endl;
+    } else {
+        std::cout << "Files available." << std::endl;
+        for (auto i = 0; i < unique_file_count; i++) {
+            std::cout << "[" << i + 1 << "] " << 
+                unique_files[i].filename << " from port " << unique_files[i].source_port << std::endl;
+        }
+        std::cout << "\nFound files from " << seeds_found << " running ports" << std::endl;
+    }
+    pthread_mutex_unlock(&file_list_mutex);
+}
+
+void show_menu() {
+    auto choice = 0;
+    do {
+        std::cout << "\nSeed App me\n";
+        std::cout << "[1] List available files.\n";
+        std::cout << "[2] Download file.\n";
+        std::cout << "[3] Download status.\n";
+        std::cout << "[4] Exit.\n";
+        std::cout << "\n ? ";
+
+        std::cin >> choice;
+        std::cout << "\n";
+
+        switch (choi
+    return 0;
+}
