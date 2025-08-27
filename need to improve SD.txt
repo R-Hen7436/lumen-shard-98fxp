@@ -1,0 +1,19 @@
+### Short answer
+Mostly correct and clear. A few important tweaks to make it fully accurate to `draft.cpp`:
+
+- Bold correctness
+  - **Startup/bind/serve**: Correct.
+  - **Discovery via LIST across ports**: Correct.
+  - **FILESIZE before download**: Correct (first seed only; fallback size if unavailable).
+  - **Parallelism**: Correct conceptually, but it’s **one worker thread per seed**, each looping over many 32‑byte chunks protected by a mutex. Consider showing multiple worker lifelines or noting “per seed”.
+
+- Must-not-miss adjustments
+  - **Local-only loopback**: All peers are `127.0.0.1` on ports `8080–8084`.
+  - **Fixed chunk size**: 32 bytes per `DOWNLOAD` reply; server closes if `offset >= size`.
+  - **Destination path**: `files/seed<me>/<me>/<first_source>/<filename>`; show a “Create directory + pre-size with ftruncate” step before workers write.
+  - **Duplicate check before starting**: Add a step “Check existing file in local paths” using `check_file_already_exists(...)`. If match, abort download.
+  - **Background start**: The download launches in a detached std::thread; UI returns immediately to the menu.
+  - **Status (Option 3)**: The diagram shows live progress, but the current code only prints “Download status…” and does not aggregate per-file progress. It would need shared state exposure from `parallel_download` to match your expected output.
+  - **Menu loop quirk**: The loop currently exits on choice 3 (status), not 4 (exit).
+
+If you add those notes/steps (especially duplicate check, per-seed workers, path creation, and the real behavior of Option 3), your diagram will perfectly match the implementation.

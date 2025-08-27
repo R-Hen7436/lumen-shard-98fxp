@@ -16,7 +16,6 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
-#include <thread>
 
 // Port configuration
 const int PORTS[] = {8080, 8081, 8082, 8083, 8084};
@@ -25,7 +24,7 @@ const int MAX_FILES = 100;
 const int MAX_FILENAME_LENGTH = 256;
 
 // Download configuration
-const int delay = 1000000; // microseconds
+const int delay = 5000; // microseconds
 
 // Global variables
 typedef struct {
@@ -336,7 +335,15 @@ void* port_request(void* arg) {
                 
                 if (bytes_read > 0) {
                     send(client_filehandle, file_buffer, bytes_read, 0);
-                } 
+                    long long start_range = offset;
+                    long long end_range = offset + (long long)bytes_read - 1;
+                    std::cout << "[seed " << my_bound_port << "] sent chunk "
+                              << start_range << "-" << end_range
+                              << " for '" << filename << "'" << std::endl;
+                } else {
+                    std::cout << "[seed " << my_bound_port << "] no data for '" << filename
+                              << "' at offset " << offset << std::endl;
+                }
                 
                 fclose(file);
             } else {
@@ -382,7 +389,7 @@ void port_server() {
   
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
-        auto server_filehandle = bind_and_listen(port); 
+        auto server_filehandle = bind_and_listen(port); //change this sock variable to server_handle
 
         if (server_filehandle >= 0) {
             my_bound_port = port;
@@ -482,11 +489,7 @@ void download_file() {
     }
      
     std::cout << "Starting download for file: " << filename << std::endl;
-    // Run download in detached background thread so menu remains usable
-    std::thread([fn = std::string(filename), seeds = available_seeds]() {
-        parallel_download(fn.c_str(), seeds);
-    }).detach();
-    std::cout << "Download started in background." << std::endl;
+     parallel_download(filename, available_seeds);
 }
 
 void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds) {
@@ -694,7 +697,8 @@ void parallel_download(const char* filename, const std::vector<int>& available_s
         // Not fatal; we'll still write sequentially by offsets
     }
 
-    // start download
+    std::cout << "Starting download from " << total_seeds << " seeds..." << std::endl;
+    std::cout << "Target size: " << total_size << " bytes in " << ((total_size + CHUNK_SIZE - 1) / CHUNK_SIZE) << " chunks" << std::endl;
 
     // Shared context
     parallel_ctx_t ctx{};
@@ -723,7 +727,7 @@ void parallel_download(const char* filename, const std::vector<int>& available_s
         int seed_port = c->seeds[seed_idx];
         delete w;
 
-        // worker start
+        std::cout << "worker start port " << seed_port << std::endl;
         int local_chunks = 0;
         while (true) {
             // Claim next offset from the shared queue (32-byte blocks)
@@ -771,7 +775,9 @@ void parallel_download(const char* filename, const std::vector<int>& available_s
                 local_chunks += 1;
                 long long start_range = offset;
                 long long end_range = offset + (long long)total_read - 1;
-                // per-chunk received
+                std::cout << "downloaders: #" << completion_number << " received "
+                          << start_range << "-" << end_range
+                          << " from seed " << seed_port << std::endl;
                 // Optional per-chunk delay (e.g., demonstration or throttling)
                 usleep(delay);
                 // Track per-seed count (not locked strictly, minor race acceptable for stats)
@@ -780,12 +786,13 @@ void parallel_download(const char* filename, const std::vector<int>& available_s
                 // If no data, it's likely EOF on this seed at this offset; keep going with other offsets
             }
         }
-        // worker exit
+        std::cout << "worker exit  port " << seed_port << ", chunks=" << local_chunks << std::endl;
         return NULL;
     };
 
     // Launch one thread per seed (not per chunk). Each worker will claim many chunks.
     std::vector<pthread_t> tids(total_seeds);
+    std::cout << "Launching " << total_seeds << " download worker thread..." << std::endl;
     for (int i = 0; i < total_seeds; i++) {
         worker_arg_t* w = new worker_arg_t{ &ctx, i };
         pthread_create(&tids[i], NULL, worker_fn, w);
@@ -800,6 +807,9 @@ void parallel_download(const char* filename, const std::vector<int>& available_s
     ::close(fd);
     pthread_mutex_destroy(&ctx.queue_mutex);
 
+    std::cout << "Download completed!" << std::endl;
+    std::cout << "Total bytes downloaded: " << ctx.bytes_downloaded << std::endl;
+    std::cout << "Download path: " << download_path << std::endl;
 }
 
 
@@ -815,7 +825,7 @@ void listAvailableFiles() {
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
         if (port != my_bound_port) {
-            // trying port
+            std::cout << "Trying to connect to port " << port << " ";
             
             auto sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock < 0) {
@@ -835,7 +845,7 @@ void listAvailableFiles() {
                 auto n = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (n > 0) {
                     buffer[n] = '\0';
-                    // connected, found files
+                    std::cout << "connected, found files" << std::endl;
                     seeds_found++;
                     
                     char *saveptr2;
@@ -848,28 +858,28 @@ void listAvailableFiles() {
                         line = strtok_r(NULL, "\n", &saveptr2);
                     }
                 } else {
-                    // no response
+                    std::cout << "no response" << std::endl;
                 }
             } else {
-                // not running
+                std::cout << "not running" << std::endl;
             }
             
             close(sock);
         }
     }
     
-    // done
+    std::cout << "done." << std::endl;
     
     pthread_mutex_lock(&file_list_mutex);
     if (unique_file_count == 0) {
-        // no files found
+        std::cout << "No files found from port instances." << std::endl;
     } else {
-        // files available
+        std::cout << "Files available." << std::endl;
         for (auto i = 0; i < unique_file_count; i++) {
             std::cout << "[" << i + 1 << "] " << 
                 unique_files[i].filename << " from port " << unique_files[i].source_port << std::endl;
         }
-        // found files from N ports
+        std::cout << "\nFound files from " << seeds_found << " running ports" << std::endl;
     }
     pthread_mutex_unlock(&file_list_mutex);
 }

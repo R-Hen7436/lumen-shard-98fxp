@@ -1,0 +1,223 @@
+### parallel_download: what it does and how it works
+
+- **Purpose**: Download a selected file from one or more seeds simultaneously by splitting it into fixed-size chunks and fetching different chunks in parallel.
+
+- **Inputs**: 
+  - `filename`: the target file name.
+  - `available_seeds`: list of TCP ports (peers) that have the file.
+
+- **Preparation**:
+  - Determines your seed ID (`my_folder_id`) and the first source seed’s ID (`first_source_folder_id`) to build the destination path: `files/seed<me>/<me>/<first_source>/<filename>`.
+  - Queries the first seed for file size via `get_file_size_from_seed`; if unknown, falls back to a small default.
+  - Creates the destination directory (if needed), opens the output file, and pre-sizes it with `ftruncate(total_size)` to enable out-of-order writes.
+
+- **Chunking model**:
+  - Uses a fixed `CHUNK_SIZE = 32` bytes.
+  - Maintains a shared `next_offset` counter inside a `parallel_ctx_t` protected by `queue_mutex`.
+  - Conceptually, the file is a sequence of 32-byte chunks: offsets 0, 32, 64, … up to `total_size`.
+
+- **Worker-per-seed parallelism**:
+  - Spawns one POSIX thread per seed; each thread loops until all offsets are claimed.
+  - Worker loop:
+    1. Lock `queue_mutex`, read `next_offset`, increment by 32, unlock (this “claims” a unique chunk).
+    2. Connect to its seed on `127.0.0.1:<seed_port>`.
+    3. Send `DOWNLOAD <filename>|<offset>`.
+    4. Receive up to 32 bytes.
+    5. Write received bytes directly into the correct position using `pwrite(fd, buf, n, offset)`.
+    6. Update shared counters (`bytes_downloaded`, `chunks_downloaded`) under lock.
+    7. Optional `usleep(delay)` to slow down for visibility.
+  - Repeats until `next_offset >= total_size`.
+
+- **Thread-safety and coordination**:
+  - Only the chunk-claiming and progress counters are mutex-protected; network I/O and file writes are per-thread and isolated by offset.
+  - Pre-sizing the file avoids reallocations and ensures `pwrite` at arbitrary offsets is valid.
+
+- **Completion**:
+  - Main thread `pthread_join`s all workers.
+  - Closes the output file and destroys the mutex.
+  - At that point the destination file should be fully assembled from the downloaded chunks.
+
+- **Key properties**:
+  - **Scales with seeds**: More seeds → more worker threads → higher aggregate throughput (bounded by network and disk).
+  - **Out-of-order safe**: Chunks arrive in any order; `pwrite` places them correctly.
+  - **Deterministic chunk size**: Always 32 bytes per request, making the protocol and scheduling simple.
+  - **Resilience**: If a worker fails to read from its seed, it just claims the next chunk on the next iteration; other seeds continue making progress.
+
+
+
+
+
+
+
+  ### Line-by-line walkthrough of parallel_download
+
+```637:803:draft.cpp
+void parallel_download(const char* filename, const std::vector<int>& available_seeds) {
+    if (available_seeds.empty()) { std::cout << "No seed available for this file." << std::endl; return; }
+
+    const int CHUNK_SIZE = 32;
+    auto total_seeds = (int)available_seeds.size();
+
+    auto my_folder_id = -1;
+    for (auto i = 0; i < MAX_PORTS; i++) { if (PORTS[i] == my_bound_port) { my_folder_id = i + 1; break; } }
+    if (my_folder_id == -1) { std::cout << "Error: Could not determine local folder." << std::endl; return; }
+
+    auto first_source_folder_id = -1;
+    for (auto i = 0; i < MAX_PORTS; i++) { if (PORTS[i] == available_seeds[0]) { first_source_folder_id = i + 1; break; } }
+    if (first_source_folder_id == -1) { std::cout << "Error: Could not determine folder ID for port " << available_seeds[0] << std::endl; return; }
+
+    auto total_size = get_file_size_from_seed(available_seeds[0], filename);
+    if (total_size <= 0) { total_size = CHUNK_SIZE * 320; }
+
+    char download_dir[1024];
+    snprintf(download_dir, sizeof(download_dir), "files/seed%d/%d/%d", my_folder_id, my_folder_id, first_source_folder_id);
+    if (create_directory(download_dir) != 0) { std::cout << "Warning: Could not create directory " << download_dir << std::endl; }
+    char download_path[1024];
+    auto path_result = snprintf(download_path, sizeof(download_path), "%s/%s", download_dir, filename);
+    if (path_result >= (int)sizeof(download_path)) { std::cout << "Error: File path too long, cannot download." << std::endl; return; }
+
+    int fd = ::open(download_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) { std::cout << "Failed to create output file: " << download_path << std::endl; return; }
+    if (ftruncate(fd, total_size) != 0) { }
+
+    parallel_ctx_t ctx{};
+    ctx.filename = filename;
+    ctx.seeds = available_seeds;
+    ctx.chunk_size = CHUNK_SIZE;
+    ctx.total_size = total_size;
+    ctx.my_folder_id = my_folder_id;
+    ctx.first_source_folder_id = first_source_folder_id;
+    ctx.fd = fd;
+    ctx.next_offset = 0;
+    ctx.bytes_downloaded = 0;
+    ctx.chunks_downloaded = 0;
+    ctx.stop = false;
+    pthread_mutex_init(&ctx.queue_mutex, NULL);
+
+    std::vector<int> chunks_per_seed(total_seeds, 0);
+
+    auto worker_fn = [](void* arg) -> void* {
+        worker_arg_t* w = (worker_arg_t*)arg;
+        parallel_ctx_t* c = w->ctx;
+        int seed_idx = w->seed_index;
+        int seed_port = c->seeds[seed_idx];
+        delete w;
+
+        int local_chunks = 0;
+        while (true) {
+            pthread_mutex_lock(&c->queue_mutex);
+            if (c->stop || c->next_offset >= c->total_size) { pthread_mutex_unlock(&c->queue_mutex); break; }
+            long long offset = c->next_offset;
+            c->next_offset += c->chunk_size;
+            pthread_mutex_unlock(&c->queue_mutex);
+
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) { continue; }
+            struct sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_port = htons(seed_port); inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+            if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) { close(sock); continue; }
+
+            char request[512];
+            snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", c->filename, offset);
+            send(sock, request, strlen(request), 0);
+
+            std::vector<char> buf(c->chunk_size);
+            int total_read = 0;
+            while (total_read < c->chunk_size) {
+                int n = recv(sock, buf.data() + total_read, c->chunk_size - total_read, 0);
+                if (n <= 0) break;
+                total_read += n;
+            }
+            close(sock);
+
+            if (total_read > 0) {
+                ssize_t written = pwrite(c->fd, buf.data(), total_read, offset);
+                (void)written;
+                int completion_number;
+                pthread_mutex_lock(&c->queue_mutex);
+                c->bytes_downloaded += total_read;
+                c->chunks_downloaded += 1;
+                completion_number = c->chunks_downloaded;
+                pthread_mutex_unlock(&c->queue_mutex);
+                local_chunks += 1;
+                long long start_range = offset;
+                long long end_range = offset + (long long)total_read - 1;
+                usleep(delay);
+            } else {
+            }
+        }
+        return NULL;
+    };
+
+    std::vector<pthread_t> tids(total_seeds);
+    for (int i = 0; i < total_seeds; i++) {
+        worker_arg_t* w = new worker_arg_t{ &ctx, i };
+        pthread_create(&tids[i], NULL, worker_fn, w);
+    }
+
+    for (int i = 0; i < total_seeds; i++) { pthread_join(tids[i], NULL); }
+
+    ::close(fd);
+    pthread_mutex_destroy(&ctx.queue_mutex);
+}
+```
+
+
+line per line explain
+- 637: Function begins; takes `filename` and list of seed ports.
+- 638–641: If no seeds provided, print and return.
+- 643: Define fixed chunk size = 32 bytes.
+- 644: Cache number of seeds.
+- 647: Initialize your seed folder id to unknown.
+- 648–650: Find your folder id by matching `my_bound_port` in `PORTS` (index+1).
+- 651–654: If not found, print error and return.
+- 658: Initialize first source folder id to unknown.
+- 659–661: Map first seed’s port to its folder id (index+1).
+- 662–665: If mapping failed, print error and return.
+- 668: Ask first seed for total file size.
+- 669–671: If not available, fall back to a 10KB size (32 × 320).
+- 674: Declare buffer for destination directory path.
+- 675: Build `files/seed<me>/<me>/<first_source>` directory path.
+- 676–678: Try to create that directory tree; warn if it fails (non-fatal).
+- 679: Declare buffer for full file path.
+- 680: Build `download_path = <dir>/<filename>`.
+- 681–684: If path would overflow buffer, print error and return.
+- 687: Open destination file for create/truncate, write-only.
+- 688–691: If open fails, print error and return.
+- 693–695: Pre-size file to `total_size` to allow out-of-order writes; ignore failure.
+- 700: Create and zero a shared context struct.
+- 701–712: Populate context with filename, seeds, chunk size, total size, ids, fd, counters, and init mutex.
+- 715: Prepare per-seed chunk counters (currently not used elsewhere).
+- 719: Define worker thread function (C-style lambda thunk).
+- 720–724: Unpack arguments: get context, seed index/port; delete heap arg holder.
+- 727: Local counter of chunks by this worker.
+- 728: Worker loop begins.
+- 730: Lock shared queue mutex.
+- 731–734: If told to stop or all offsets assigned, unlock and exit loop.
+- 735–737: Claim current `offset` and advance `next_offset` by chunk size; unlock.
+- 740: Create TCP socket.
+- 741: If socket create fails, skip to next iteration.
+- 742: Fill sockaddr with loopback and this worker’s seed port.
+- 743: Try to connect; on failure, close socket and continue.
+- 746–748: Format and send `DOWNLOAD <filename>|<offset>` request.
+- 751: Allocate a buffer of exactly `chunk_size`.
+- 752–757: Read up to `chunk_size` bytes; stop early on EOF/error.
+- 758: Close the connection.
+- 760: If we got any bytes…
+- 762: Write them at the exact `offset` using `pwrite` (ignore short writes).
+- 766–770: Lock, update shared `bytes_downloaded` and `chunks_downloaded`, capture completion order, unlock.
+- 771: Increment this worker’s local chunk count.
+- 772–773: Compute byte range received (not used further).
+- 776: Optional delay (usleep) to slow down for demo/throttling.
+- 779–781: Else branch for no-data case: do nothing and loop again.
+- 784: Worker returns when loop exits.
+- 788: Create vector to hold thread IDs (one per seed).
+- 789–792: For each seed, allocate a `worker_arg_t`, start a worker thread.
+- 795–797: Join (wait for) all worker threads to finish.
+- 800: Close the destination file descriptor.
+- 801: Destroy the mutex inside the context.
+- 803: Function ends.
+
+- Optional clarifications:
+  - The shared “work queue” is just `next_offset` protected by `queue_mutex`. Each worker atomically claims the next 32-byte slice.
+  - Out-of-order writes are safe because of `pwrite` and pre-sizing (`ftruncate`).
+  - Only the first discovered seed is used to determine the destination subfolder and to query size; all seeds found are used for data.

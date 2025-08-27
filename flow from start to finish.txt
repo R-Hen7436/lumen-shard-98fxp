@@ -1,0 +1,84 @@
+### Run and server startup
+- **Bind and listen**:
+  - On start, `port_server()` iterates `PORTS = {8080..8084}`.
+  - First successful `bind`/`listen` becomes `my_bound_port`; this also sets your seed folder id (index+1).
+  - Spawns a background accept loop `server_thread(...)` that `accept`s connections and, per connection, spawns `port_request(...)`.
+- **Where files are served from**:
+  - Your instance serves files under `files/seed<me>/<me>/`.
+
+### Serving requests (what peers can ask you)
+- `LIST` → `get_own_files(...)` returns a numbered list of filenames from `files/seed<me>/<me>/`.
+- `FILESIZE <filename>` → returns `SIZE:<bytes>` if found.
+- `DOWNLOAD <filename>|<offset>` → replies with up to 32 bytes starting at `offset` (server closes if offset ≥ size).
+
+### Menu shown to the user
+- `show_menu()` prints:
+  - [1] List available files.
+  - [2] Download file.
+  - [3] Download status.
+  - [4] Exit.
+- Note: the current loop condition exits on option 3, not 4.
+
+### Option 1: List available files (discovery)
+- `listAvailableFiles()`:
+  - Clears the global `unique_files` list.
+  - For each other port in `PORTS` (excluding `my_bound_port`):
+    - Connects to `127.0.0.1:<port>`, sends `LIST`, receives text like `[1] name`.
+    - Parses lines and calls `add_unique_file(...)` to store unique filenames along with the source port.
+  - Prints the de-duplicated file list:
+    - Example: `[1] Multiple2.txt from port 8081`
+
+### Option 2: Download file (selection and preparation)
+- `download_file()`:
+  - Shows the current `unique_files` (built by option 1). If empty, asks you to run option 1 first.
+  - Prompts: “Enter file ID:”.
+  - Copies the chosen filename.
+
+#### Locating seeders for the selected file
+- `scan_seeds_for_file(filename, available_seeds)`:
+  - For each other port:
+    - Sends `LIST` and checks whether the exact `filename` appears.
+    - If found, appends that port to `available_seeds`.
+  - Prints how many seeds have the file.
+
+#### Determining size and avoiding duplicates
+- `get_file_size_from_seed(firstSeed, filename)`:
+  - Sends `FILESIZE filename` to the first seed; expects `SIZE:<bytes>`.
+  - If unavailable, falls back to a default size (10KB) later.
+- `check_file_already_exists(filename, expected_size, ...)`:
+  - Looks for an exact-size match under:
+    - `files/seed<me>/<me>/`
+    - `files/seed<me>/<me>/1/` … `/5/`
+  - If found, prints “already exists” and aborts.
+
+#### Starting the download
+- If not a duplicate:
+  - Prints “Starting download…”.
+  - Launches a detached background `std::thread` that calls `parallel_download(filename, available_seeds)` so the menu remains usable.
+
+### Parallel download (how chunks move)
+- `parallel_download(...)`:
+  - Resolves your seed id and the folder id of the first source seed.
+  - Destination directory: `files/seed<me>/<me>/<first_source>/`.
+  - Creates the directory and opens the destination file at `files/seed<me>/<me>/<first_source>/<filename>`.
+  - Determines `total_size` (from `FILESIZE`, else fallback ~10KB).
+  - Pre-sizes the file via `ftruncate(total_size)`.
+  - Uses a shared context with:
+    - `chunk_size = 32`, `next_offset = 0`, mutex-protected.
+  - Spawns one POSIX thread per seed:
+    - Each worker repeatedly:
+      - Locks the queue, claims the next 32-byte `offset`, unlocks.
+      - Connects to its assigned seed and sends `DOWNLOAD filename|offset`.
+      - Reads up to 32 bytes, then `pwrite`s at the claimed `offset`.
+      - Updates counters; sleeps `usleep(delay)` optionally for pacing.
+    - Stops when `next_offset >= total_size`.
+  - Joins workers, closes file, destroys mutex.
+
+### What the user experiences step by step
+1) Run program → it binds one of `8080..8084`, begins serving your local files, and shows the menu.
+2) Choose [1] → the app scans other ports with `LIST`, builds a unique list, and displays filenames with their source ports.
+3) Choose [2] → the app shows the same list and asks which file ID to download.
+4) Enter a number → it rescans all seeds specifically for that filename, gets size from the first seed, checks local duplicates, then starts a background parallel download across all seeds that have the file.
+5) Menu returns immediately while the background download proceeds (32-byte chunks per worker/seed).
+
+If you’d like, I can also add real progress reporting to option [3] by introducing a thread-safe download registry and printing per-file bytes and percentage.

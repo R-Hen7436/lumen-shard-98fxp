@@ -16,7 +16,6 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
-#include <thread>
 
 // Port configuration
 const int PORTS[] = {8080, 8081, 8082, 8083, 8084};
@@ -25,7 +24,7 @@ const int MAX_FILES = 100;
 const int MAX_FILENAME_LENGTH = 256;
 
 // Download configuration
-const int delay = 1000000; // microseconds
+const int delay = 5000; // microseconds
 
 // Global variables
 typedef struct {
@@ -336,7 +335,9 @@ void* port_request(void* arg) {
                 
                 if (bytes_read > 0) {
                     send(client_filehandle, file_buffer, bytes_read, 0);
-                } 
+                } else {
+                    // no data at requested offset
+                }
                 
                 fclose(file);
             } else {
@@ -382,7 +383,7 @@ void port_server() {
   
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
-        auto server_filehandle = bind_and_listen(port); 
+        auto server_filehandle = bind_and_listen(port); //change this sock variable to server_handle
 
         if (server_filehandle >= 0) {
             my_bound_port = port;
@@ -482,11 +483,7 @@ void download_file() {
     }
      
     std::cout << "Starting download for file: " << filename << std::endl;
-    // Run download in detached background thread so menu remains usable
-    std::thread([fn = std::string(filename), seeds = available_seeds]() {
-        parallel_download(fn.c_str(), seeds);
-    }).detach();
-    std::cout << "Download started in background." << std::endl;
+     parallel_download(filename, available_seeds);
 }
 
 void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds) {
@@ -786,6 +783,7 @@ void parallel_download(const char* filename, const std::vector<int>& available_s
 
     // Launch one thread per seed (not per chunk). Each worker will claim many chunks.
     std::vector<pthread_t> tids(total_seeds);
+    std::cout << "Launching " << total_seeds << " download worker thread..." << std::endl;
     for (int i = 0; i < total_seeds; i++) {
         worker_arg_t* w = new worker_arg_t{ &ctx, i };
         pthread_create(&tids[i], NULL, worker_fn, w);
@@ -800,6 +798,9 @@ void parallel_download(const char* filename, const std::vector<int>& available_s
     ::close(fd);
     pthread_mutex_destroy(&ctx.queue_mutex);
 
+    std::cout << "Download completed!" << std::endl;
+    std::cout << "Total bytes downloaded: " << ctx.bytes_downloaded << std::endl;
+    std::cout << "Download path: " << download_path << std::endl;
 }
 
 
