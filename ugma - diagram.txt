@@ -1,0 +1,128 @@
+### Executive walkthrough of the download flow
+
+- Startup
+  - App starts and binds to the first available port (local server).
+  - A background accept loop waits for incoming requests (“LIST”, “FILESIZE”, “DOWNLOAD”).
+
+- Option 1: List available files
+  - The app probes other ports (peers). For each reachable peer:
+    - Connects over TCP, sends “LIST”, and receives that peer’s file list.
+    - Deduplicates file names and tracks which port offers each file.
+  - The user sees one consolidated list of unique files and the seed ports offering them.
+
+- Option 2: Download file (parallel, chunked)
+  - The user picks a file from the consolidated list.
+  - The app scans peers again to confirm which ones actually host that file.
+  - It queries one peer for the file size, checks for a local copy with the same size, and registers the download in a small status registry (filename, total size, bytes downloaded).
+  - The app launches one worker thread per available seeder. Each worker:
+    - Repeatedly requests a specific subset of fixed-size chunks (32 bytes) from “its” seeder using TCP “DOWNLOAD <filename>|<offset>”.
+    - Writes received data to a temporary part file and updates the global progress counters.
+    - Paces requests with a small delay to avoid hammering peers.
+  - When all workers finish, the app assembles the final file by reading the part files in logical order and writing the combined stream to the destination path.
+  - The status is marked complete.
+
+- Worker assignment model (why downloads are fast)
+  - Each worker handles a “stripe” of chunks (e.g., with two seeders: worker A gets chunks 0,2,4,…; worker B gets 1,3,5,…).
+  - All workers run concurrently; they do not wait for one another. This utilizes multiple peers in parallel and reduces total time.
+
+- Option 3: Download status
+  - On demand, the app prints the current state of all known downloads:
+    - Filename, downloaded kilobytes vs total kilobytes, and percent.
+  - Because the download runs in background threads, pressing 3 again refreshes progress as it changes.
+
+- Reliability and simplicity
+  - Each download request is independent (connect → request → receive up to 32 bytes → write).
+  - Final assembly is deterministic: merge reads the correct chunk from the correct part file based on chunk index and seed count.
+  - The design cleanly separates concerns:
+    - Peer listing (discover files)
+    - Per-chunk transfer (simple protocol)
+    - Final merge (ordered assembly)
+    - Status reporting (lightweight registry)
+
+
+
+
+    ### Create the sequence diagram in Astah (quick walkthrough)
+
+- Create a new project
+  - File → New. Add a Sequence diagram (Model Explorer → right‑click a package → Add → Diagram → Sequence Diagram).
+
+- Add lifelines (left to right)
+  - Actor: User
+  - Lifelines (objects): Menu/Main, Local Server (server_thread), port_request, Seeder: Port A, Seeder: Port B, Downloader (parallel_download), Worker A, Worker B, Status Registry, Filesystem
+  - Use Object icon → click canvas → name them exactly as above. Make User an Actor.
+
+- Startup fragment
+  - Add a Combined Fragment (rectangle) labeled “Startup”.
+  - Messages:
+    - User → Menu/Main: Run program
+    - Menu/Main → Local Server (server_thread): port_server() bind_and_listen()
+    - Local Server (server_thread) → Menu/Main (return): Listening on available port
+
+- Option 1: List available files
+  - Add Combined Fragment “Option 1: List”
+  - Lifeline Menu/Main sends a loop Combined Fragment:
+    - Loop (guard: for each port != my_bound_port)
+      - Menu/Main → Seeder: Port A: TCP connect + “LIST”
+      - Seeder: Port A → port_request: accept() handler
+      - port_request → Menu/Main (return): “[n] filename…” list
+  - Menu/Main → User (return): Display unique files + ports
+
+- Option 2: Download file
+  - Add Combined Fragment “Option 2: Download”
+  - Messages:
+    - User → Menu/Main: Select [2] Download (choose file)
+    - Menu/Main → Menu/Main: scan_seeds_for_file(filename) [internal]
+    - Menu/Main → Seeder: Port A: connect + “LIST”
+    - port_request → Menu/Main (return): response contains filename?
+    - Menu/Main → Seeder: Port B: connect + “LIST”
+    - port_request → Menu/Main (return): response contains filename?
+    - Menu/Main → Seeder: Port A: get_file_size_from_seed(filename)
+    - port_request → Menu/Main (return): SIZE:<bytes>
+    - Menu/Main → Status Registry: register_download_status(filename, total)
+    - Menu/Main → Downloader (parallel_download): Start (background)
+
+  - Add Combined Fragment “par” (parallel) → two operands
+    - Operand 1 (Worker A):
+      - Downloader → Worker A: start(seed A)
+      - Add a loop (guard: i = 0,2,4,…):
+        - Worker A → Seeder: Port A: “DOWNLOAD <name>|<offset>”
+        - Seeder: Port A → port_request: read file at offset (32B)
+        - port_request → Worker A (return): up to 32 bytes
+        - Worker A → Filesystem: append to part file part-0
+        - Worker A → Status Registry: add_download_progress(bytes)
+    - Operand 2 (Worker B): same pattern for Port B, offsets 1,3,5,… writing part-1
+
+  - After par:
+    - Downloader → Worker A: join()
+    - Downloader → Worker B: join()
+
+  - Merge fragment
+    - Add Combined Fragment “Merge”
+    - Messages:
+      - Downloader → Filesystem: Open final file path
+      - Downloader → Filesystem: For chunk 0..N-1, read from part‑<chunk%seeds> at offset_in_part
+      - Downloader → Filesystem: Write chunk to final file
+      - Downloader → Status Registry: complete_download_status(filename)
+    - Downloader → Menu/Main (return): Download finished
+
+- Option 3: Download status
+  - Add Combined Fragment “Option 3: Status”
+  - Messages:
+    - User → Menu/Main: Select [3] Status
+    - Menu/Main → Status Registry: print_download_status()
+    - Status Registry → Menu/Main (return): [i] name downloaded/total (percent)
+    - Menu/Main → User (return): Show status list
+
+- Polish
+  - Add activation bars where appropriate (click message, then lifeline to add execution).
+  - Use Notes to annotate: CHUNK_SIZE=32, fixed-stride assignment, merge logic.
+  - Layout: Align lifelines and auto‑layout messages (Diagram → Align/Distribute).
+  - Export: File → Export Image → PNG/SVG.
+
+- Mapping tips
+  - “Seeder: Port A/B” are instances of remote peers; reuse the same “port_request” lifeline to represent the handler on those peers.
+  - “Downloader (parallel_download)” is the coordinator; “Worker A/B” are the per‑seed threads launched by it.
+  - Status Registry reflects your in‑memory `g_download_status`.
+
+This produces a clean sequence diagram matching your implementation: discovery (LIST), size query (FILESIZE), chunk transfer (DOWNLOAD with 32‑byte chunks), parallel workers, merge, and status reporting.

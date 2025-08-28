@@ -1,0 +1,475 @@
+clude <string>
+#include <unistd<arpa/inet.h>
+#include <dirent..h>
+#include <sys/stat.h>  // F // Added for scan_seeds_for_filam> // For file logging
+#includtion - easily changeable
+const TS = 5;
+const int MAX_FILES = 1ration
+const int CHUNK_DELAY_MIiables
+typedef struct {
+    in socket_FileHandle; //for server;
+    int thread_index;
+} portAME_LENGTH];
+    int source_por
+int bound_port_count = 0;
+filof char array
+int unique_file_c_mutex = PTHREAD_MUTEX_INITIALIZfstream server_log_file;
+pthrea_mutex_t server_log_mutex = PTHRtring server_log_filename;
+boollse;
+
+// Download thread data TH];
+    std::vector<int>* avai long long total_size;
+    longd_chunks;
+} download_thread_datta_t active_download;
+pthread_mFunction prototypes
+void init_const std::string& message);
+voiging();
+void close_server_loggie(long long bytes);
+void* downlar* filename, std::vector<int>& lename, const std::vector<int>& g long total, int bar_width = 50name);
+bool check_file_already_ting_path, size_t path_size);
+   memset(addr, 0, sizeof(*addr) INADDR_ANY;
+    addr->sin_portecursively
+int create_directory;
+    
+    // Safe string copy        return -1; // Path too l  temp[sizeof(temp) - 1] = '\0';
+    
+    // Remove trailing sl    temp[len - 1] = '\0';
+        for (pos = temp + 1; *pos; po          if (mkdir(temp, 0755)     }
+            *pos = '/';
+f (mkdir(temp, 0755) != 0 && err
+}
+
+// Logging system implemen
+    struct tm* timeinfo = locabuffer), "%Y%m%d_%H%M%S", timeinile_size(long long bytes) {
+   nit_index = 0;
+    double size         size /= 1024.0;
+       index == 0) {
+        snprintf(dex]);
+    } else {
+        sn);
+    }
+    
+    return std:ent_logging_active) return; // Aamp();
+    client_log_filename my_bound_port) + ".log";
+    
+open(client_log_filename, std::i()) {
+        client_logging_actruct tm* timeinfo = localtime(&mp_str, sizeof(timestamp_str), "e << "[" << timestamp_str << "] log_file << "[" << timestamp_str       client_log_file.flush();}
+
+void init_server_logging() 
+    
+    std::string timestam std::to_string(my_bound_port) +rver_log_mutex);
+    server_log
+    
+    if (server_log_file.i      time_t now = time(0);
+   amp_str[80];
+        strftime(tfo);
+        
+        server_lD ===" << std::endl;
+        seport: " << my_bound_port << std:thread_mutex_unlock(&server_log_ if (!client_logging_active) {
+ock(&client_log_mutex);
+    if       struct tm* timeinfo = locastamp, sizeof(timestamp), "%Y-%m"[" << timestamp << "] " << messpthread_mutex_unlock(&client_log  if (!server_logging_active) {lock(&server_log_mutex);
+    if       struct tm* timeinfo = locestamp, sizeof(timestamp), "%Y-% "[" << timestamp << "] " << mes pthread_mutex_unlock(&server_lo_lock(&client_log_mutex);
+    i  time_t now = time(0);
+       80];
+        strftime(timestamp        client_log_file << "[" <
+        client_log_file.close()tex_unlock(&client_log_mutex);
+er_log_mutex);
+    if (server_lw = time(0);
+        struct tm*   strftime(timestamp, sizeof(tiver_log_file << "[" << timestampver_log_file.close();
+        sing ended: " << server_log_filenutex);
+}
+
+// Download thread download_thread_data_t* downloadkground download thread started // Perform the actual download
+d_data->available_seeds));
+    );
+    delete download_data->avad_mutex_unlock(&download_threadeted for file: " + std::string(dcks if a port is available by at
+//     int sock = socket(AF_INE;
+//     }
+
+//     struct soc int result = bind(sock, (struct return result == 0;
+// }
+
+// bind_and_listen(int port) {
+   {
+        return -1;
+    }
+, &opt, sizeof(opt));
+
+    str  if (bind(sock, (struct sockaddturn -1;
+    }
+
+    if (liste }
+
+    return sock;
+}
+
+//tr* filename, int source_port) {i = 0; i < unique_file_count; i+0) {
+            pthread_mutex_
+    
+    if (unique_file_counng
+        if (strlen(filename)ue_file_count].filename, filenamle_count].filename[MAX_FILENAME_ue_files[unique_file_count].sour  }
+    }
+    pthread_mutex_unfor serving to other ports)
+voider_id = -1;
+
+    for (auto i t) {
+            my_folder_id =folder_id == -1) {
+        resp   }
+    
+    char folder_pathed%d/%d", my_folder_id, my_foldeder_path);
+    if (dr != NULL)      
+        while ((de = read0 && strcmp(de->d_name, "..") !=printf(file_entry, sizeof(file_e
+                // Safe stringent_len = strlen(response);
+        if (current_len + entry_len, file_entry, max_size - current // Buffer full, stop adding filr(dr);
+    }
+}
+
+// Handle poauto client_filehandle = *(int*)  
+    char buffer[1024]; //bufnt_filehandle, buffer, sizeof(bu= 0) {
+        close(client_fil;
+    
+
+
+    if (strcmp(buffwn_files(response, sizeof(respon), 0); //sending back to client      // Handle FILESIZE commandlename_len = strlen(buffer + 9); strncpy(filename, buffer + 9, MTH - 1] = '\0';
+        } else            send(client_filehandlilehandle);
+            return e/newlines
+        auto newline;
+        
+        // Find the for (auto i = 0; i < MAX_PORTS;       my_folder_id = i + 1;
+    if (my_folder_id != -1) {
+   sizeof(file_path), "files/seed%d           FILE *file = fopen(fi exact file size
+              ell(file);
+                fclose
+                char size_re_response), "SIZE:%ld", file_sizen(size_response), 0);
+         ss << "SEED PORT " << my_bound_†’ Responding with " << file_siz   } else {
+                chalient_filehandle, error_msg, strf (strncmp(buffer, "DOWNLOAD ", D filename offset"
+        char        
+        // Parse filenstrchr(buffer + 9, '|');
+               size_t filename_len = d_FILENAME_LENGTH) {
+              filename[filename_len] = '\0'   } else {
+                chad(client_filehandle, error_msg, ;
+                return NULL;original parsing
+            sie_len < MAX_FILENAME_LENGTH) {
+H - 1);
+                filenam          char error_msg[] = "ER, error_msg, strlen(error_msg), return NULL;
+            }
+   
+        auto newline = strchr( 
+        std::stringstream ss;uest for '" << filename << "' st    
+        // Find the file i i = 0; i < MAX_PORTS; i++) {
+ folder_id = i + 1;
+            older_id != -1) {
+            ce_path), "files/seed%d/%d/%s", m FILE *file = fopen(file_path, "
+                fseek(file, 0,            fseek(file, 0, SEEK_
+                ss2 << "SEED POs total)";
+                log_f offset is valid
+             EED: Offset beyond file size, no              close(client_fileh              
+                set, SEEK_SET);
+                             char file_buffer[3izeof(file_buffer), file);
+        if (bytes_read > 0) {
+     ad, 0) <= 0) {
+                 else {
+                       tream ss3;
+                    "SEED PORT " << my_bound_port << " << (offset + bytes_read - 1);ss3 << "SEED PORT " << my_bound_sition " << offset << " to " <<            }
+                       } else {
+                  " << my_bound_port << ": No dat
+                    log_server(  fclose(file);
+                total_sent << " bytes of file '            } else {
+          " << my_bound_port << ": File '" log_server(ss6.str());
+         char error_msg[] = "ERROR: Fil, strlen(error_msg), 0);
+          return NULL;
+}
+
+// Serverg) {
+    //int server_filehandlandle for the server
+
+    auto handle from the argument
+    ftruct sockaddr_in client_addr;
+ (1) { //loop infinitely
+      kaddr*)&client_addr, &client_lendle >= 0) {
+            auto cllocate separate
+            // opy
+            if (client_file allocation failed");
+                  }
+          
+                   //this will create a ;
+            pthread_create(&hnew port is bounded, it will cre       }
+    }
+    return NULLe ports...";
+    
+    for (aut       
+        //if (is_port_a;
+            if (sock >= 0) {          // Set up port thread     port_threads[0].folder_id =            port_threads[0].socke 1;
+                snprintf(po
+                         "fileid);
+                
+         std::cout << " Found port " << ng at port " << port << "." << sead to handle port requests
+
+ int));  
+                if (seError: Memory allocation failed";
+                }
+          server_tid;
+                pthptr);
+                pthread_d           }
+        //}
+    }dl;
+}
+
+void download_file(){ead_mutex_lock(&file_list_mutex)iles available to download. Pleales available to download. Pleasmutex_unlock(&file_list_mutex);     std::cout << "Available file_file_count; i++) {
+         ses[i].filename << " (from seed a   }
+     
+     // Get user's hoice = 0;
+     std::cin >> fil< 1 || file_choice > unique_fileseeders for file ID " + std::to_. Failed" << std::endl;
+       <std::endl;
+         pthread_mu     // Get file info before rel // Safe string copy with boundshoice - 1].filename);
+     if (, unique_files[file_choice - 1].AME_LENGTH - 1] = '\0'; // Ensurilename too long.");
+         spthread_mutex_unlock(&file_list_le_list_mutex);
+     
+     log+ "'...");
+     std::cout << "S;
+     
+     // Scan all seedsn_seeds_for_file(filename, avail   log_client("No seeds found wi       std::cout << "No seeds fodl;
+         return;
+     }
+  auto expected_size = get_file_ssize <= 0) {
+         log_clien  std::cout << "Could not determ
+         log_client("Expected f   std::cout << "Expected file s       // Check if file already 24];
+         if (check_file_alting_path))) {
+             loging(filename) + " already exists<< filename << " already exists"      log_client("File not found std::cout << "File not found lo      }
+     }
+     
+     // lock(&download_thread_mutex);
+ ownload is already in progress. ent("Download request rejected -_unlock(&download_thread_mutex);d data
+     strncpy(active_downdownload.filename[MAX_FILENAME_Ltd::vector<int>(available_seeds)lize progress tracking
+     acttes = 0;
+     active_download.t   
+     // Create background did, NULL, download_thread_workerd to create download thread" << d thread");
+         delete acte = false;
+         pthread_mut   
+     // Detach thread so itid);
+     pthread_mutex_unlock(rted in background for file: " <ing the menu while the download  initiated for file: " + std::str the same file
+void scan_seedss) {
+    available_seeds.clear(rrent bound port)
+    for (auto      if (port != my_bound_port) seed at port " + std::to_string       std::cout << "Scanning sesock = socket(AF_INET, SOCK_STRE("socket failed for port " + stdd::endl;
+                contin addr;
+            addr.sin_fam      inet_pton(AF_INET, "127.0.ck, (struct sockaddr*)&addr, sizk if file exists
+                          char buffer[1024];
+0);
+                if (n > 0)                     // Check if ar* line = strtok(buffer, "\n");    log_client("Checking files ole (line != NULL) {
+                       if (bracket_end && bilename = bracket_end + 2;
+    ed_filename) + "' (length: " + s          if (strcmp(seed_filenad = true;
+                         break;
+                    ne = strtok(NULL, "\n");
+      ile_found) {
+                  < "found" << std::endl;
+              } else {
+               cout << "not found" << std::endl        log_client("no response out << "no response" << std::end_client("port " + std::to_stringning" << std::endl;
+             
+    log_client("Found " + ststd::string(filename) + "'");
+ with file '" << filename << "'" lable seed for progress trackingget_file_size_from_seed(availabl  log_client("Estimated file siz
+}
+
+// New function to downloaround_robin(const char* filenameseeds.empty()) {
+        log_cl "No seeds available for this fiCHUNK_SIZE = 32;  // Fixed 32-byuto current_seed_index = 0;
+   d = -1;
+    for (auto i = 0; i            my_folder_id = i + 1;id == -1) {
+        log_client(<< "Error: Could not determine l/ We'll determine the download d24];
+    char download_path[102er_id = -1;
+    
+    // Direct  log_client("Starting round-rob);
+    log_client("Downloading    // Initialize progress tracki = 0;
+    auto estimated_total_   
+    // Update global progre  if (active_download.is_active)        active_download.total_chRound up
+    }
+    pthread_mutl_size <= 0) {
+        estimateog_client("Using fallback file s");
+    }
+    
+    // InitialDownload Progress: Starting at 0  // Track which seeds have fini(total_seeds, false);
+    std::d_count = total_seeds;
+    
+     while (total_bytes_downloadedo current_seed_port = available_eeds
+        if (seed_finished[t_seed_index + 1) % total_seeds; to current seed
+        auto s
+            log_client("Failed d_port));
+            current_s continue;
+        }
+        INET;
+        addr.sin_port = h, &addr.sin_addr);
+        
+  = 0) {
+            log_client("d_port));
+            close(soc total_seeds;
+            conti current offset - use a delimite
+        snprintf(request, sizeo);
+        send(sock, request, read exactly CHUNK_SIZE bytes
+ ed = 0;
+        auto total_chun or until connection closes
+   bytes = recv(sock, chunk_buffer       if (bytes <= 0) {
+                 total_chunk_bytes += b_bytes;
+        
+        if (b                  if (strncmp(chr messages - this is normal whenmated_total_size) {
+           _seed_port) + ": " + std::stringse(sock);
+            current_s 
+            // Track consecut        consecutive_errors++;
+          log_client("Too many cobreak;
+            }
+          the first chunk, determine fold{
+                // Map port t) {
+                    if (PORrce_folder_id = i + 1;
+        
+                
+            _client("Error: Could not determ                    close(sock);  
+                // Create do snprintf(download_dir, sizeof(dy_folder_id, my_folder_id, firstt("Creating directory: " + std::nload_dir) != 0) {
+            :string(download_dir));
+       he downloaded file
+            ath), "%s/%s", download_dir, filwas truncated
+                ilog_client("Error: File path too                  return;
+      file
+                output_file) {
+                    log_cth));
+                    close         
+                log_cseed_port) + " (folder ID " + st         
+            // Write d, output_file);
+            to++;
+            
+            /k(&download_thread_mutex);
+    _download.downloaded_bytes = totchunks = chunk_count;
+         
+            
+            // Rent consecutive_failures = 0;
+  / Check if we've reached end of ived < CHUNK_SIZE) {
+          partial chunk too
+             nished sending data (sent " + stunks from this seed: " + std::to      seed_finished[current_seed       
+                if (act_size) {
+                    lootal_bytes_downloaded) + " bytes} else {
+                // Ful       chunks_per_seed[current_sng(current_seed_port) + " sent 3his seed: " + std::to_string(chu      
+            // Also breabytes_downloaded >= estimated_toal size: " + std::to_string(tota      }
+            
+         stop
+            if (chunk_counnt("Safety limit reached. Stoppites");
+                break;
+lient("Port " + std::to_string(ceed_finished[current_seed_index]      close(sock);
+                      
+            // If alunt == 0) {
+                log.");
+                break;
+   close(sock);
+        
+       ed_index = (current_seed_index +s for better progress monitoringows for status updates
+        ile) {
+        fclose(output_figround mode)
+    if (total_byteleted at " + std::to_string(totad) + " bytes (100.0%)");
+      ient("Total bytes downloaded: " Total chunks downloaded: " + std + std::string(download_path));log_client("Chunk Distribution bze_t i = 0; i < total_seeds; i++auto port = available_seeds[i];/ chunk_count;
+                < ": " << chunks_per_seed[i] << ion(1) << percentage << "%)";
+ ks_check += chunks_per_seed[i];+ std::to_string(total_chunks_chr");
+        
+        // Closelogging();
+    } else {
+      d::cout << "\nDownload failed - 
+        
+        // Close cli);
+    }
+}
+
+// Progress bar long current, long long total, ie progress doesn't exceed 100%
+ 1.0f) progress = 1.0f;
+    
+ < "\r[";
+    for (int i = 0; i      else if (i == pos) std::cou<< "] ";
+    
+    // Show percon(1) << (progress * 100.0) << ")";
+    
+    std::cout.flush() correct size
+bool check_file_ar* existing_path, size_t path_si  for (auto i = 0; i < MAX_PORTSmy_folder_id = i + 1;
+         
+        return false;
+    }
+ght exist
+    const char* possict in our folder
+        "filesles/seed%d/%d/2/%s",         // // Downloaded from seed 3
+           "files/seed%d/%d/5/%s"     = 0; i < sizeof(possible_paths)24];
+        snprintf(check_patr_id, filename);
+        
+                // Get file size
+  size = ftell(file);
+           es expected size
+            ifh where we found the file
+           strcpy(existing_path, chec           }
+        }
+    }
+a specific seed using FILESIZE cfilename) {
+    auto sock = socrn -1;
+    }
+    
+    struct port = htons(port);
+    inet_pt(sock, (struct sockaddr*)&addr, 
+    }
+    
+    // Send FILESInprintf(request, sizeof(request)est), 0);
+    
+    // Read theed = recv(sock, buffer, sizeof(beived > 0) {
+        buffer[byt 0) {
+            long long filsize from seed: " + std::to_stri   }
+    }
+    
+    // FallbaCould not determine file size, u
+}
+
+// Port2Port File Discove() {
+    log_client("Searching  std::endl;
+    
+    // Reset que_file_count = 0;
+    pthread;
+    
+    // Try to connect t       auto port = PORTS[i];
+  ng to connect to port " + std::t port " << port << " ";
+                auto sock = socket(AF_I    log_client("socket failed fo"socket failed" << std::endl;
+    struct sockaddr_in addr;
+    htons(port);
+            inet_       if (connect(sock, (structck, "LIST", strlen("LIST"), 0);       auto n = recv(sock, buffe              buffer[n] = '\0';tring(port) + ", found files");d::endl;
+                    se response and add files
+           while (line != NULL) {
+                       if (bracket_eunique_file(bracket_end + 2, portrtok(NULL, "\n");
+            ent("no response from port " + sonse" << std::endl;
+            + std::to_string(port) + " not ndl;
+            }
+           ent("Search completed.");
+    s
+    pthread_mutex_lock(&file_lit("No files found from port inst::cout << "No files found from pnstances appear to be running)" . Found files from " + std::to_s"Files available." << std::endl;      log_client("[" + std::to_s(from port " + std::to_string(un << i + 1 << "] " << 
+         s[i].source_port << ")" << std:: seeds_found << " running port(stex);
+}
+
+void show_download_s    
+    pthread_mutex_lock(&do     // Calculate percentage
+  l_size > 0) {
+            percead.total_size * 100.0;
+        aded_str = format_file_size(actiformat_file_size(active_downloadd::cout << "[1] " << active_down/" << total_str 
+              << "%)" << std::endl;
+    } els    }
+    pthread_mutex_unlock(ce = 0;
+    do {
+        std::able files.\n";
+        std::cod status.\n";
+        std::cout::cin >> choice;
+        std::c                listAvailableFil    download_file();
+          _status();
+                brea." << std::endl;
+              valid choice. Please try again."main() {
+    bound_port_count =    // Initialize download threaoad.available_seeds = nullptr;
+ded_bytes = 0;
+    active_downl
+    
+    // Start single port{
+        std::cout << "Could n
+    }
+    
+    show_menu();
+threads[0].socket_FileHandle >=     
+    // Close any active lo
+    
+    pthread_mutex_destroy);
+    pthread_mutex_destroy(&stex);
+    
+    return 0;
+}

@@ -1,0 +1,23 @@
+- Dynamic work stealing is better in practice: maximizes throughput when seeders have different speeds/latencies, 
+handles hiccups/retries, and finishes sooner.
+- Fixed stride (your current approach) is simpler and deterministic but can idle faster seeders and elongate 
+total time if any seeder is slow.
+
+Recommendation:
+- For small demos or equal-speed peers, fixed stride is fine.
+- For real use, switch to dynamic: maintain a shared nextChunk index guarded by a mutex, 
+each seeder grabs the next available chunk until done.
+
+
+
+
+currently
+It divides chunks by fixed stride per seeder, not dynamically.
+With 2 seeders: port at index 0 downloads chunks i=0,2,4,…; port at index 1 downloads i=1,3,5,…
+Each chunk is 32 bytes. After a seeder finishes one assigned chunk, it immediately requests its next 
+assigned chunk (i += total_seeds) until all of its sequence is done.
+It does not rebalance if one seeder is slower; there’s no work stealing. If you want dynamic balancing,
+ we can switch to a shared “next chunk” queue so any faster seeder grabs the next available chunk.
+
+
+ 

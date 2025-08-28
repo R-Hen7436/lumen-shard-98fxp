@@ -1,0 +1,126 @@
+ < MAX_PORTS; i++) {
+        if            my_folder_id = i + 1
+    }
+    
+    if (my_folder<< "Error: Could not determine l     return;
+    }
+    
+    cr download_path[1024];
+    FILEt first_source_folder_id = -1;
+ round-robin download from " << d::endl;
+    std::cout << "Downbyte chunks..." << std::endl;
+ aded = 0LL;
+    auto chunk_coun_size = get_file_size_from_seed(    
+    if (estimated_total_sital_size = CHUNK_SIZE * 100;
+   seed_finished(total_seeds, fals_per_seed(total_seeds, 0);
+    eds;
+    
+    while (total_bytsize && active_seed_count > 0) { = available_seeds[current_seed_eed_finished[current_seed_index]dex = (current_seed_index + 1) %nue;
+        }
+        
+     OCK_STREAM, 0);
+        if (soced_index = (current_seed_index +continue;
+        }
+        
+
+        addr.sin_family = AF_Ions(current_seed_port);
+        &addr.sin_addr);
+        
+   ockaddr*)&addr, sizeof(addr)) !=
+            current_seed_index al_seeds;
+            continue;har request[512];
+        snpriOWNLOAD %s|%lld", filename, totand(sock, request, strlen(requesthunk_buffer[CHUNK_SIZE];
+             
+        while (total_ch       auto bytes = recv(sock, c CHUNK_SIZE - total_chunk_bytes,) {
+                break;
+   unk_bytes += bytes;
+        }
+eived = total_chunk_bytes;
+     > 0) {
+            if (strncmp) {
+                if (total_bl_size) {
+                    st " << current_seed_port << ": "tes_received) << std::endl;
+   close(sock);
+                cu_index + 1) % total_seeds;
+    atic int consecutive_errors = 0;rors++;
+                if (con 2) {
+                    break      continue;
+            }
+unk_count == 0) {
+             S; i++) {
+                    i) {
+                        fir                      break;
+       }
+                
+      r_id == -1) {
+                 t determine folder ID for port "dl;
+                    close(sn;
+                }
+         f(download_dir, sizeof(download_                       my_folderfolder_id);
+                
+ ory(download_dir) != 0) {
+     ning: Could not create directory
+                }
+           _result = snprintf(download_path, download_dir, filename);
+     (path_result >= sizeof(downloadtd::cout << "Error: File path to::endl;
+                    cloeturn;
+                }
+     put_file = fopen(download_path, put_file) {
+                   output file: " << download_path    close(sock);
+               
+                
+             m seed at port " << current_seed_source_folder_id << ")" << std:   
+            fwrite(chunk_bufile);
+            total_bytes_           chunk_count++;
+     eceived < CHUNK_SIZE) {
+       _seed_index]++;
+               _seed_port << " finished sending<< " bytes in final chunk) [Totaunks_per_seed[current_seed_index        seed_finished[current_se   active_seed_count--;
+       ctive_seed_count == 0 || total_bal_size) {
+                    ed. Final size: " << total_bytesendl;
+                    break  } else {
+                chun+;
+                std::cout << " sent 32-byte chunk (" << chuneed: " << chunks_per_seed[currenl;
+            }
+            nloaded >= estimated_total_size) "Download completed. Final size " bytes" << std::endl;
+                   
+            if (ch      std::cout << "Safety limit << total_bytes_downloaded << "       break;
+            }
+            std::cout << "Port " <<ore data to send" << std::endl;nt_seed_index] = true;
+              
+            close(sock); = (current_seed_index + 1) % to      if (active_seed_count == 0< "All seeds have finished sendistd::endl;
+                breaontinue;
+        }
+        
+ rent_seed_index = (current_seed_   usleep(CHUNK_DELAY_MICROSECONt_file) {
+        fclose(outputtal_bytes_downloaded > 0) {
+   ownload completed!" << std::endlytes downloaded: " << total_byte    std::cout << "Total chunks dtd::endl;
+        std::cout << th << std::endl;
+        
+    tion by Seed:" << std::endl;
+  ;
+        for (size_t i = 0; i    if (chunks_per_seed[i] > 0) {ailable_seeds[i];
+             _seed[i] * 100.0) / chunk_count;  Port " << port << ": " << chun                   << std::fixedentage << "%)" << std::endl;
+   += chunks_per_seed[i];
+       cout << " Verification: " << totcount << " chunks accounted for"      std::cout << "\nDownload fd::endl;
+        remove(downloa_file_already_exists(const char*ze, char* existing_path, size_t _id = -1;
+    for (auto i = 0; f (PORTS[i] == my_bound_port) {1;
+            break;
+        r_id == -1) {
+        return far* possible_paths[] = {
+       "files/seed%d/%d/1/%s",
+         "files/seed%d/%d/3/%s",
+
+   utex);
+    if (unique_file_coun"No files found from port instan{
+        std::cout << "Files a  for (auto i = 0; i < unique_fid::cout << "[" << i + 1 << "] " s[i].filename << " from port " < std::endl;
+        }
+         " << seeds_found << " running ppthread_mutex_unlock(&file_list_
+    auto choice = 0;
+    do {pp me\n";
+        std::cout <<         std::cout << "[2] Downlo<< "[3] Download status.\n";
+  ;
+        std::cout << "\n ? ";
+        std::cout << "\n";
+
+ 0;
+}

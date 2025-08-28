@@ -1,0 +1,133 @@
+10KB
+
+
+    for (auto i = 0; i (PORTS[i] == my_bound_port) {
+;
+            break;
+        }_id == -1) {
+        std::cout ocal folder." << std::endl;
+   har download_dir[1024];
+    cha *output_file = nullptr;
+    in    
+    std::cout << "Startingtotal_seeds << " seeds..." << stloading in " << CHUNK_SIZE << "-   
+    auto total_bytes_downlot = 0;
+    auto estimated_totalavailable_seeds[0], filename);
+ze <= 0) {
+        estimated_to  }
+    
+    std::vector<bool>e);
+    std::vector<int> chunksint active_seed_count = total_sees_downloaded < estimated_total_
+        auto current_seed_portindex];
+        
+        if (s) {
+            current_seed_in total_seeds;
+            conti   auto sock = socket(AF_INET, Sk < 0) {
+            current_se 1) % total_seeds;
+                    struct sockaddr_in addr;NET;
+        addr.sin_port = ht inet_pton(AF_INET, "127.0.0.1",     if (connect(sock, (struct s 0) {
+            close(sock);= (current_seed_index + 1) % tot
+        }
+        
+        cntf(request, sizeof(request), "Dl_bytes_downloaded);
+        se), 0);
+        
+        char c  auto total_chunk_bytes = 0;
+ unk_bytes < CHUNK_SIZE) {
+     hunk_buffer + total_chunk_bytes, 0);
+            if (bytes <= 0         }
+            total_ch        
+        auto bytes_rec    
+        if (bytes_received(chunk_buffer, "ERROR:", 6) == 0ytes_downloaded < estimated_totatd::cout << "Seed error from por << std::string(chunk_buffer, by             }
+                rrent_seed_index = (current_seed            
+                st
+                consecutive_ersecutive_errors >= total_seeds *;
+                }
+                      
+            if (ch   for (auto i = 0; i < MAX_PORTf (PORTS[i] == current_seed_portst_source_folder_id = i + 1;
+                    }
+                     if (first_source_folde   std::cout << "Error: Could no << current_seed_port << std::enock);
+                    retur       
+                snprintdir), "files/seed%d/%d/%d", 
+  _id, my_folder_id, first_source_               if (create_direct               std::cout << "War " << download_dir << std::endl;     
+                auto path, sizeof(download_path), "%s/%s"            
+                if_path)) {
+                    so long, cannot download." << stdse(sock);
+                    r           
+                out"wb");
+                if (!out std::cout << "Failed to create << std::endl;
+                      return;
+                }   std::cout << "First chunk fro_port << " (folder ID " << first:endl;
+            }
+         ffer, 1, bytes_received, output_downloaded += bytes_received;
+        
+            if (bytes_r         chunks_per_seed[current std::cout << "Port " << current data (sent " << bytes_received l chunks from this seed: " << ch] << "]" << std::endl;
+        ed_index] = true;
+                      
+                if (aytes_downloaded >= estimated_totstd::cout << "End of file detect_downloaded << " bytes" << std::;
+                }
+          ks_per_seed[current_seed_index]+ "Port " << current_seed_port <<k_count << ") [Total from this st_seed_index] << "]" << std::end
+            if (total_bytes_dow {
+                std::cout <<: " << total_bytes_downloaded <<         break;
+            }
+unk_count > 10000) {
+           reached. Stopping download at "bytes" << std::endl;
+                   
+        } else {
+    current_seed_port << " has no m
+            seed_finished[curre    active_seed_count--;
+      
+            current_seed_indextal_seeds;
+            
+      ) {
+                std::cout <ng data. Download complete." << k;
+            }
+            c       close(sock);
+        curindex + 1) % total_seeds;
+     DS);
+    }
+    
+    if (outpu_file);
+    }
+    
+    if (to     std::cout << "Round-robin d;
+        std::cout << "Total bs_downloaded << std::endl;
+    ownloaded: " << chunk_count << s"File saved to: " << download_pa    std::cout << "Chunk Distribu      int total_chunks_check = 0< total_seeds; i++) {
+         
+                auto port = av   auto percentage = (chunks_per
+                std::cout << "ks_per_seed[i] << " chunks (" 
+ << std::setprecision(1) << perc              total_chunks_check     }
+        }
+        std::al_chunks_check << "/" << chunk_ << std::endl;
+    } else {
+  ailed - no data received." << std_path);
+    }
+}
+
+bool check filename, long long expected_sipath_size) {
+    auto my_folderi < MAX_PORTS; i++) {
+        i
+            my_folder_id = i + }
+    }
+    
+    if (my_foldelse;
+    }
+    
+    const cha "files/seed%d/%d/%s",
+         "files/seed%d/%d/2/%s",
+       pthread_mutex_lock(&file_list_mt == 0) {
+        std::cout << ces." << std::endl;
+    } else vailable." << std::endl;
+      le_count; i++) {
+            st<< 
+                unique_file< unique_files[i].source_port <<std::cout << "\nFound files fromorts" << std::endl;
+    }
+    mutex);
+}
+
+void show_menu() {
+        std::cout << "\nSeed A"[1] List available files.\n";
+ad file.\n";
+        std::cout       std::cout << "[4] Exit.\n"
+
+        std::cin >> choice;       switch (choi
+    return 

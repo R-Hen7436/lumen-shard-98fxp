@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
+
 #include <thread>
 
 // Port configuration
@@ -24,8 +25,7 @@ const int MAX_PORTS = 5;
 const int MAX_FILES = 100;
 const int MAX_FILENAME_LENGTH = 256;
 
-// Download configuration
-const int delay = 1000000; // microseconds
+const int delay = 5000; //microseconds
 
 // Global variables
 typedef struct {
@@ -50,6 +50,17 @@ int unique_file_count = 0;
 int my_bound_port = -1;
 
 pthread_mutex_t file_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t downloads_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    char filename[MAX_FILENAME_LENGTH];
+    long long total_size;
+    long long downloaded_bytes;
+    bool completed;
+} download_status_t;
+
+std::vector<download_status_t> g_download_status;
 
 // Function prototypes
 void setup_socket_addr(struct sockaddr_in* addr, int port);
@@ -57,7 +68,75 @@ int create_directory(const char* path);
 void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds);
 long long get_file_size_from_seed(int port, const char* filename);
 bool check_file_already_exists(const char* filename, long long expected_size, char* existing_path, size_t path_size);
- void parallel_download(const char* filename, const std::vector<int>& available_seeds);
+void multi_seed_dl(const char* filename, const std::vector<int>& available_seeds);
+void print_download_status();
+void register_download_status(const char* filename, long long total_size);
+void add_download_progress(const char* filename, long long bytes);
+void complete_download_status(const char* filename);
+
+void print_download_status() {
+    pthread_mutex_lock(&downloads_mutex);
+    if (g_download_status.empty()) {
+        std::cout << "\nDownload status:\n(none)\n" << std::endl;
+        pthread_mutex_unlock(&downloads_mutex);
+        return;
+    }
+    std::cout << "\nDownload status:" << std::endl;
+    for (size_t i = 0; i < g_download_status.size(); ++i) {
+        const auto &d = g_download_status[i];
+        double pct = (d.total_size > 0) ? (100.0 * (double)d.downloaded_bytes / (double)d.total_size) : 0.0;
+        std::cout << "[" << (i + 1) << "] " << d.filename << " "
+                  << d.downloaded_bytes / 1024 << "kb/" << d.total_size / 1024 << "kb ("
+                  << std::fixed << std::setprecision(2) << pct << "%)" << std::endl;
+    }
+    std::cout << std::endl;
+    pthread_mutex_unlock(&downloads_mutex);
+}
+
+void register_download_status(const char* filename, long long total_size) {
+    pthread_mutex_lock(&downloads_mutex);
+    for (auto &d : g_download_status) {
+        if (strcmp(d.filename, filename) == 0) {
+            d.total_size = total_size;
+            d.completed = false;
+            d.downloaded_bytes = 0;
+            pthread_mutex_unlock(&downloads_mutex);
+            return;
+        }
+    }
+    download_status_t d{};
+    strncpy(d.filename, filename, MAX_FILENAME_LENGTH - 1);
+    d.filename[MAX_FILENAME_LENGTH - 1] = '\0';
+    d.total_size = total_size;
+    d.downloaded_bytes = 0;
+    d.completed = false;
+    g_download_status.push_back(d);
+    pthread_mutex_unlock(&downloads_mutex);
+}
+
+void add_download_progress(const char* filename, long long bytes) {
+    pthread_mutex_lock(&downloads_mutex);
+    for (auto &d : g_download_status) {
+        if (strcmp(d.filename, filename) == 0) {
+            d.downloaded_bytes += bytes;
+            if (d.downloaded_bytes > d.total_size) d.downloaded_bytes = d.total_size;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&downloads_mutex);
+}
+
+void complete_download_status(const char* filename) {
+    pthread_mutex_lock(&downloads_mutex);
+    for (auto &d : g_download_status) {
+        if (strcmp(d.filename, filename) == 0) {
+            d.downloaded_bytes = d.total_size;
+            d.completed = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&downloads_mutex);
+}
 
 // Data for parallel download workers
 typedef struct {
@@ -235,7 +314,7 @@ void* port_request(void* arg) {
             strncpy(filename, buffer + 9, MAX_FILENAME_LENGTH - 1);
             filename[MAX_FILENAME_LENGTH - 1] = '\0';
         } else {
-            char error_msg[] = "ERROR: Filename too long";
+            char error_msg[] = "Filename too long";
             send(client_filehandle, error_msg, strlen(error_msg), 0);
             close(client_filehandle);
             return NULL;
@@ -266,7 +345,7 @@ void* port_request(void* arg) {
                 snprintf(size_response, sizeof(size_response), "SIZE:%ld", file_size);
                 send(client_filehandle, size_response, strlen(size_response), 0);
             } else {
-                char error_msg[] = "ERROR: File not found";
+                char error_msg[] = "File not found";
                 send(client_filehandle, error_msg, strlen(error_msg), 0);
             }
         }
@@ -283,7 +362,7 @@ void* port_request(void* arg) {
                 filename[filename_len] = '\0';
                 offset = atoll(delimiter_pos + 1);
             } else {
-                char error_msg[] = "ERROR: Filename too long";
+                char error_msg[] = "Filename too long";
                 send(client_filehandle, error_msg, strlen(error_msg), 0);
                 close(client_filehandle);
                 return NULL;
@@ -294,7 +373,7 @@ void* port_request(void* arg) {
                 strncpy(filename, buffer + 9, MAX_FILENAME_LENGTH - 1);
                 filename[MAX_FILENAME_LENGTH - 1] = '\0';
             } else {
-                char error_msg[] = "ERROR: Filename too long";
+                char error_msg[] = "Filename too long";
                 send(client_filehandle, error_msg, strlen(error_msg), 0);
                 close(client_filehandle);
                 return NULL;
@@ -320,7 +399,7 @@ void* port_request(void* arg) {
             if (file) {
                 fseek(file, 0, SEEK_END);
                 long file_size = ftell(file);
-                fseek(file, 0, SEEK_SET);
+                fseek(file, 0, SEEK_SET); //try wagtanga
                 
                 if (offset >= file_size) {
                     fclose(file);
@@ -336,11 +415,11 @@ void* port_request(void* arg) {
                 
                 if (bytes_read > 0) {
                     send(client_filehandle, file_buffer, bytes_read, 0);
-                } 
+                }
                 
                 fclose(file);
             } else {
-                char error_msg[] = "ERROR: File not found";
+                char error_msg[] = "File not found";
                 send(client_filehandle, error_msg, strlen(error_msg), 0);
             }
         }
@@ -382,7 +461,7 @@ void port_server() {
   
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
-        auto server_filehandle = bind_and_listen(port); 
+        auto server_filehandle = bind_and_listen(port); //change this sock variable to server_handle
 
         if (server_filehandle >= 0) {
             my_bound_port = port;
@@ -450,7 +529,7 @@ void download_file() {
         strncpy(filename, unique_files[file_choice - 1].filename, MAX_FILENAME_LENGTH - 1);
         filename[MAX_FILENAME_LENGTH - 1] = '\0';
     } else {
-        std::cout << "Error: Filename too long." << std::endl;
+        std::cout << "Filename too long." << std::endl;
         pthread_mutex_unlock(&file_list_mutex);
         return;
     }
@@ -470,21 +549,21 @@ void download_file() {
     if (expected_size <= 0) {
         std::cout << "Could not determine file size. Download may fail." << std::endl;
     } else {
-        std::cout << "Expected file size: " << expected_size << " bytes" << std::endl;
-         
         char existing_path[1024];
         if (check_file_already_exists(filename, expected_size, existing_path, sizeof(existing_path))) {
             std::cout << " File [" << file_choice << "] " << filename << " already exists" << std::endl;
             return;
         } else {
-            std::cout << "File not found locally or size mismatch. Starting download..." << std::endl;
+            std::cout << "Starting download..." << std::endl;
         }
     }
      
     std::cout << "Starting download for file: " << filename << std::endl;
-    // Run download in detached background thread so menu remains usable
-    std::thread([fn = std::string(filename), seeds = available_seeds]() {
-        parallel_download(fn.c_str(), seeds);
+    
+    //  multi_seed_dl(filename, available_seeds);
+
+     std::thread([fn = std::string(filename), seeds = available_seeds]() {
+        multi_seed_dl(fn.c_str(), seeds);
     }).detach();
     std::cout << "Download started in background." << std::endl;
 }
@@ -552,6 +631,173 @@ void scan_seeds_for_file(const char* filename, std::vector<int>& available_seeds
     std::cout << "Found " << available_seeds.size() << " seeds with file '" << filename << "'" << std::endl;
 }
 
+void multi_seed_dl(const char* filename, const std::vector<int>& available_seeds) {
+    if (available_seeds.empty()) {
+        std::cout << "No seed available for this file." << std::endl;
+        return;
+    }
+
+    const int CHUNK_SIZE = 32;
+    auto total_seeds = (int)available_seeds.size();
+
+     // Resolve my folder id (used to build the destination path)
+    auto my_folder_id = -1;
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        if (PORTS[i] == my_bound_port) { my_folder_id = i + 1; break; }
+    }
+ 
+    //this will find the file path of the first seeder/chunks downloaded
+    auto first_source_folder_id = -1;
+    for (auto i = 0; i < MAX_PORTS; i++) {
+        if (PORTS[i] == available_seeds[0]) { first_source_folder_id = i + 1; break; }
+    }
+
+    // Determine total size (fallback to 10KB)
+    auto total_size = get_file_size_from_seed(available_seeds[0], filename);
+    if (total_size <= 0) {
+        total_size = CHUNK_SIZE * 320; // 10 KB fallback
+    }
+    long long chunks = (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+    // register status entry
+    register_download_status(filename, total_size);
+
+     char download_dir[1024];
+    snprintf(download_dir, sizeof(download_dir), "files/seed%d/%d/%d", my_folder_id, my_folder_id, first_source_folder_id);
+    if (create_directory(download_dir) != 0) {
+        std::cout << "Could not create directory " << download_dir << std::endl;
+    }
+    char download_path[1024];
+
+    auto path_result = snprintf(download_path, sizeof(download_path), "%s/%s", download_dir, filename);
+    if (path_result >= (int)sizeof(download_path)) {
+        std::cout << "File path too long, cannot download." << std::endl;
+        return;
+    }
+
+    // seeder function
+    auto seeder_fn = [](void* arg) -> void* {
+        worker_arg_t* s = (worker_arg_t*)arg;
+        int seed_idx = s->seed_index;
+        int seed_port = s->ctx->seeds[seed_idx];
+        const char* filename = s->ctx->filename;
+        long long chunk_size = s->ctx->chunk_size;
+        long long total_size = s->ctx->total_size;
+        long long chunks = (total_size + chunk_size - 1) / chunk_size;
+
+        // make a temporary file where the seeder stores the chunks downloaded
+        std::string part_filename = std::string("seeders/") + filename + ".part-" + std::to_string(seed_idx);
+        FILE* part_file = fopen(part_filename.c_str(), "wb");
+        if (!part_file) { return NULL; }
+
+        // Download the chunks assigned to this seeder
+        for (long long i = seed_idx; i < chunks; i += s->ctx->seeds.size()) {
+            long long offset = i * chunk_size;
+            long long this_chunk_size = std::min(chunk_size, total_size - offset); //this will check if thare are atleast chunks size bytes left be downloaded
+
+            // Connect to seed
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) continue;
+            struct sockaddr_in addr;
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(seed_port);
+            inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+            if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) { close(sock); continue; }
+
+            // Request this chunk
+            char request[512];
+            snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", filename, offset);
+            send(sock, request, strlen(request), 0);
+
+            // request sent
+
+            // Read chunk
+            std::vector<char> buffer(this_chunk_size);
+            int total_read_chunks = 0;
+            while (total_read_chunks < this_chunk_size) {
+                int bytes_from_sockets = recv(sock, buffer.data() + total_read_chunks, this_chunk_size - total_read_chunks, 0);
+                if (bytes_from_sockets <= 0) break;
+                total_read_chunks += bytes_from_sockets;
+            }
+            close(sock);
+
+            if (total_read_chunks > 0) { fwrite(buffer.data(), 1, total_read_chunks, part_file); add_download_progress(filename, total_read_chunks); }
+
+            // throttle between chunk requests
+            usleep(delay);
+        }
+        fclose(part_file);
+        // worker finished
+        delete s;
+        return NULL;
+    };
+
+    // Ensure part files directory exists
+    // create_directory("seeders");
+
+    // Launch one thread per seed
+    std::vector<pthread_t> tids(total_seeds);
+    parallel_ctx_t ctx{};
+    ctx.filename = filename;
+    ctx.seeds = available_seeds;
+    ctx.chunk_size = CHUNK_SIZE;
+    ctx.total_size = total_size;
+
+    for (int i = 0; i < total_seeds; i++) {
+        worker_arg_t* s = new worker_arg_t{ &ctx, i };
+        pthread_create(&tids[i], NULL, seeder_fn, s);
+    }
+
+    // Join threads
+    for (int i = 0; i < total_seeds; i++) {
+        pthread_join(tids[i], NULL);
+    }
+
+    // Merge part files
+    FILE* final_file = fopen(download_path, "wb");
+    if (!final_file) {
+        std::cout << "Failed to open final file for write." << std::endl;
+        return;
+    }
+
+    // Assemble final file from part files
+    for (long long chunk = 0; chunk < chunks; ++chunk) {
+        int seed_idx = chunk % total_seeds;
+        std::string part_filename = std::string("seeders/") + filename + ".part-" + std::to_string(seed_idx);
+        FILE* part_file = fopen(part_filename.c_str(), "rb");
+        if (!part_file) {
+            continue;
+        }
+        long long offset_in_part = (chunk / total_seeds) * CHUNK_SIZE;
+        fseek(part_file, offset_in_part, SEEK_SET);
+        long long this_chunk_size = std::min((long long)CHUNK_SIZE, total_size - chunk * CHUNK_SIZE);
+        std::vector<char> buffer(this_chunk_size);
+        size_t bytes = fread(buffer.data(), 1, this_chunk_size, part_file);
+        fwrite(buffer.data(), 1, bytes, final_file);
+        fclose(part_file);
+    }
+    fclose(final_file);
+
+    // Post-merge statistics per seed (by port)
+    std::vector<long long> bytes_by_seed(total_seeds, 0);
+    std::vector<long long> chunks_by_seed(total_seeds, 0);
+    long long total_downloaded_bytes = 0;
+    // mark as completed
+    complete_download_status(filename);
+    for (int seed_idx = 0; seed_idx < total_seeds; ++seed_idx) {
+        std::string part_filename = std::string("seeders/") + filename + ".part-" + std::to_string(seed_idx);
+        FILE* pf = fopen(part_filename.c_str(), "rb");
+        if (!pf) continue;
+        fseek(pf, 0, SEEK_END);
+        long long sz = ftell(pf);
+        fclose(pf);
+        bytes_by_seed[seed_idx] = sz;
+        chunks_by_seed[seed_idx] = (sz + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        total_downloaded_bytes += sz;
+    }
+}
+
+
 bool check_file_already_exists(const char* filename, long long expected_size, char* existing_path, size_t path_size) {
     auto my_folder_id = -1;
     for (auto i = 0; i < MAX_PORTS; i++) {
@@ -577,6 +823,7 @@ bool check_file_already_exists(const char* filename, long long expected_size, ch
     
     for (size_t i = 0; i < sizeof(possible_paths) / sizeof(possible_paths[0]); i++) {
         char check_path[1024];
+       
         snprintf(check_path, sizeof(check_path), possible_paths[i], my_folder_id, my_folder_id, filename);
         
         FILE* file = fopen(check_path, "rb");
@@ -631,175 +878,7 @@ long long get_file_size_from_seed(int port, const char* filename) {
         }
     }
     
-    return 1024 * 1024;
-}
-
-void parallel_download(const char* filename, const std::vector<int>& available_seeds) {
-    if (available_seeds.empty()) {
-        std::cout << "No seed available for this file." << std::endl;
-        return;
-    }
-
-    const int CHUNK_SIZE = 32;
-    auto total_seeds = (int)available_seeds.size();
-
-    // Resolve my folder id (used to build the destination path)
-    auto my_folder_id = -1;
-    for (auto i = 0; i < MAX_PORTS; i++) {
-        if (PORTS[i] == my_bound_port) { my_folder_id = i + 1; break; }
-    }
-    if (my_folder_id == -1) {
-        std::cout << "Error: Could not determine local folder." << std::endl;
-        return;
-    }
-
-    // Determine first_source_folder_id based on the first seed (for path organization)
-    // This preserves the existing folder layout: files/seed<me>/<me>/<source>/<file>
-    auto first_source_folder_id = -1;
-    for (auto i = 0; i < MAX_PORTS; i++) {
-        if (PORTS[i] == available_seeds[0]) { first_source_folder_id = i + 1; break; }
-    }
-    if (first_source_folder_id == -1) {
-        std::cout << "Error: Could not determine folder ID for port " << available_seeds[0] << std::endl;
-        return;
-    }
-
-    // Determine total size (fallback to 10KB). Pre-sizing helps allow out-of-order writes.
-    auto total_size = get_file_size_from_seed(available_seeds[0], filename);
-    if (total_size <= 0) {
-        total_size = CHUNK_SIZE * 320; // 10 KB fallback
-    }
-
-    // Prepare destination path and file
-    char download_dir[1024];
-    snprintf(download_dir, sizeof(download_dir), "files/seed%d/%d/%d", my_folder_id, my_folder_id, first_source_folder_id);
-    if (create_directory(download_dir) != 0) {
-        std::cout << "Warning: Could not create directory " << download_dir << std::endl;
-    }
-    char download_path[1024];
-    auto path_result = snprintf(download_path, sizeof(download_path), "%s/%s", download_dir, filename);
-    if (path_result >= (int)sizeof(download_path)) {
-        std::cout << "Error: File path too long, cannot download." << std::endl;
-        return;
-    }
-
-    // Open file descriptor for parallel writes
-    int fd = ::open(download_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd < 0) {
-        std::cout << "Failed to create output file: " << download_path << std::endl;
-        return;
-    }
-    // Pre-allocate/truncate to expected size to allow out-of-order writes
-    if (ftruncate(fd, total_size) != 0) {
-        // Not fatal; we'll still write sequentially by offsets
-    }
-
-    // start download
-
-    // Shared context
-    parallel_ctx_t ctx{};
-    ctx.filename = filename;
-    ctx.seeds = available_seeds;
-    ctx.chunk_size = CHUNK_SIZE;
-    ctx.total_size = total_size;
-    ctx.my_folder_id = my_folder_id;
-    ctx.first_source_folder_id = first_source_folder_id;
-    ctx.fd = fd;
-    ctx.next_offset = 0;
-    ctx.bytes_downloaded = 0;
-    ctx.chunks_downloaded = 0;
-    ctx.stop = false;
-    pthread_mutex_init(&ctx.queue_mutex, NULL);
-
-    // Per-seed chunk counters for summary (can be extended to print a per-seed table)
-    std::vector<int> chunks_per_seed(total_seeds, 0);
-
-    // Worker function (lambda converted to static for C++)
-    // Worker thread: claim next offset, fetch from its seed, write with pwrite
-    auto worker_fn = [](void* arg) -> void* {
-        worker_arg_t* w = (worker_arg_t*)arg;
-        parallel_ctx_t* c = w->ctx;
-        int seed_idx = w->seed_index;
-        int seed_port = c->seeds[seed_idx];
-        delete w;
-
-        // worker start
-        int local_chunks = 0;
-        while (true) {
-            // Claim next offset from the shared queue (32-byte blocks)
-            pthread_mutex_lock(&c->queue_mutex);
-            if (c->stop || c->next_offset >= c->total_size) {
-                pthread_mutex_unlock(&c->queue_mutex);
-                break;
-            }
-            long long offset = c->next_offset;
-            c->next_offset += c->chunk_size;
-            pthread_mutex_unlock(&c->queue_mutex);
-
-            // Connect to seed
-            int sock = socket(AF_INET, SOCK_STREAM, 0);
-            if (sock < 0) { continue; }
-            struct sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_port = htons(seed_port); inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-            if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) { close(sock); continue; }
-
-            // Send request for this offset
-            char request[512];
-            snprintf(request, sizeof(request), "DOWNLOAD %s|%lld", c->filename, offset);
-            send(sock, request, strlen(request), 0);
-
-            // Read up to chunk_size (short read implies EOF for that seed at this offset)
-            std::vector<char> buf(c->chunk_size);
-            int total_read = 0;
-            while (total_read < c->chunk_size) {
-                int n = recv(sock, buf.data() + total_read, c->chunk_size - total_read, 0);
-                if (n <= 0) break;
-                total_read += n;
-            }
-            close(sock);
-
-            if (total_read > 0) {
-                // Write at offset
-                ssize_t written = pwrite(c->fd, buf.data(), total_read, offset);
-                (void)written; // ignore short writes for simplicity
-                // Update shared counters and capture completion order
-                int completion_number;
-                pthread_mutex_lock(&c->queue_mutex);
-                c->bytes_downloaded += total_read;
-                c->chunks_downloaded += 1;
-                completion_number = c->chunks_downloaded;
-                pthread_mutex_unlock(&c->queue_mutex);
-                local_chunks += 1;
-                long long start_range = offset;
-                long long end_range = offset + (long long)total_read - 1;
-                // per-chunk received
-                // Optional per-chunk delay (e.g., demonstration or throttling)
-                usleep(delay);
-                // Track per-seed count (not locked strictly, minor race acceptable for stats)
-                // We'll accept occasional lost increments due to no lock to keep it simple
-            } else {
-                // If no data, it's likely EOF on this seed at this offset; keep going with other offsets
-            }
-        }
-        // worker exit
-        return NULL;
-    };
-
-    // Launch one thread per seed (not per chunk). Each worker will claim many chunks.
-    std::vector<pthread_t> tids(total_seeds);
-    for (int i = 0; i < total_seeds; i++) {
-        worker_arg_t* w = new worker_arg_t{ &ctx, i };
-        pthread_create(&tids[i], NULL, worker_fn, w);
-    }
-
-    // Join threads: wait for all workers to finish
-    for (int i = 0; i < total_seeds; i++) {
-        pthread_join(tids[i], NULL);
-    }
-
-    // Finish
-    ::close(fd);
-    pthread_mutex_destroy(&ctx.queue_mutex);
-
+    return -1;
 }
 
 
@@ -815,7 +894,7 @@ void listAvailableFiles() {
     for (auto i = 0; i < MAX_PORTS; i++) {
         auto port = PORTS[i];
         if (port != my_bound_port) {
-            // trying port
+            std::cout << "Trying to connect to port " << port << " ";
             
             auto sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock < 0) {
@@ -835,7 +914,7 @@ void listAvailableFiles() {
                 auto n = recv(sock, buffer, sizeof(buffer) - 1, 0);
                 if (n > 0) {
                     buffer[n] = '\0';
-                    // connected, found files
+                    std::cout << "connected, found files" << std::endl;
                     seeds_found++;
                     
                     char *saveptr2;
@@ -848,28 +927,28 @@ void listAvailableFiles() {
                         line = strtok_r(NULL, "\n", &saveptr2);
                     }
                 } else {
-                    // no response
+                    std::cout << "no response" << std::endl;
                 }
             } else {
-                // not running
+                std::cout << "not running" << std::endl;
             }
             
             close(sock);
         }
     }
     
-    // done
+    std::cout << "done." << std::endl;
     
     pthread_mutex_lock(&file_list_mutex);
     if (unique_file_count == 0) {
-        // no files found
+        std::cout << "No files found from port instances." << std::endl;
     } else {
-        // files available
+        std::cout << "Files available." << std::endl;
         for (auto i = 0; i < unique_file_count; i++) {
             std::cout << "[" << i + 1 << "] " << 
                 unique_files[i].filename << " from port " << unique_files[i].source_port << std::endl;
         }
-        // found files from N ports
+        std::cout << "\nFound files from " << seeds_found << " running ports" << std::endl;
     }
     pthread_mutex_unlock(&file_list_mutex);
 }
@@ -895,7 +974,7 @@ void show_menu() {
                 download_file();
                 break;
             case 3:
-                std::cout << "Download status..." << std::endl;
+                print_download_status();
                 break;
             case 4:
                 std::cout << "Exiting..." << std::endl;
@@ -903,7 +982,7 @@ void show_menu() {
             default:
                 std::cout << "Invalid choice. Please try again." << std::endl;
         }
-    } while (choice != 3);
+    } while (choice != 4);
 }
 
 int main() {
@@ -925,6 +1004,7 @@ int main() {
     }
     
     pthread_mutex_destroy(&file_list_mutex);
+    pthread_mutex_destroy(&downloads_mutex);
     
     return 0;
 }

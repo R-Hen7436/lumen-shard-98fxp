@@ -1,0 +1,92 @@
+### Startup (what runs before the menu)
+- The app binds a listening server on the first available port in `PORTS` via:
+  - `port_server` → `bind_and_listen` → launches `server_thread`
+  - `server_thread` accepts TCP connections and hands each to `port_request`
+- `port_request` serves simple commands:
+  - `LIST`: returns files in this port’s folder
+  - `FILESIZE <filename>`: returns file size
+  - `DOWNLOAD <filename>|<offset>`: sends up to 32 bytes starting at offset
+
+### Option 1: List available files
+- Goal: show unique files available from other running seeders (ports).
+- Flow:
+  - `listAvailableFiles`
+    - Clears list: `unique_file_count = 0`
+    - For each `port != my_bound_port`:
+      - Connect to the port, send `LIST`, read response
+      - Parse lines like “[id] name”
+      - Call `add_unique_file(name, port)` to deduplicate across ports
+    - Prints “Files available.” with file names and source ports
+- Key functions:
+  - `listAvailableFiles`, `add_unique_file`, `port_request` (on remote seeds handling `LIST`)
+
+### Option 2: Download file
+- Goal: download the selected file in parallel from multiple seeders.
+- Flow:
+  - `download_file`
+    - Prints the catalog built by Option 1
+    - Reads file ID, resolves `filename`
+    - `scan_seeds_for_file(filename, available_seeds)`:
+      - For each other port: connect, send `LIST`, check if filename exists in its response; collect ports that have the file
+    - `get_file_size_from_seed(available_seeds[0], filename)` to get total size
+    - `check_file_already_exists` to skip if already present locally with same size
+    - Starts background download thread calling `parallel_download(filename, available_seeds)`
+- Parallel download details:
+  - `parallel_download`
+    - Constants: `CHUNK_SIZE = 32`
+    - Determines destination path under `files/seed<me>/<me>/<first_source_id>/<filename>`
+    - Computes `total_size` and `chunks = ceil(total_size / 32)`
+    - Registers status: `register_download_status(filename, total_size)`
+    - Spawns one worker thread per seeder port:
+      - Worker function `seeder_fn`:
+        - Creates a per-seed part file: `seeders/<filename>.part-<seed_idx>`
+        - Loops i = seed_idx; i < chunks; i += total_seeds (fixed-stride assignment)
+        - Computes `offset = i * 32`
+        - Connects to the seeder port, sends `DOWNLOAD <filename>|<offset>`
+        - Receives up to 32 bytes; writes into the part file
+        - Calls `add_download_progress(filename, bytes_received)` to update status
+        - `usleep(delay)` to throttle between chunk requests
+    - Joins all worker threads
+    - Merge:
+      - Opens final file
+      - For each chunk index:
+        - Picks seed_idx = chunk % total_seeds
+        - Opens that port’s part file and seeks to `(chunk / total_seeds) * 32`
+        - Reads correct chunk size and appends to final file
+      - Closes final file
+    - Stats: sums per-seed part sizes (kept internal)
+    - Marks download done: `complete_download_status(filename)`
+- Key functions:
+  - `download_file`, `scan_seeds_for_file`, `get_file_size_from_seed`, `check_file_already_exists`
+  - `parallel_download` with internal `seeder_fn`
+  - Status helpers: `register_download_status`, `add_download_progress`, `complete_download_status`
+  - Server side serving chunks: `port_request` (“DOWNLOAD …” branch)
+
+### Option 3: Download status
+- Goal: show a snapshot of all known downloads (active or completed).
+- Flow:
+  - `print_download_status`
+    - Reads `g_download_status` under `downloads_mutex`
+    - Prints “[n] <filename> <downloaded_kb>/<total_kb> (<percent>%)” and “done” if complete
+- How it updates:
+  - `register_download_status` is called at the start of `parallel_download`
+  - Worker threads call `add_download_progress` after each chunk
+  - After merge, `complete_download_status` marks it done
+- You can press 3 repeatedly to refresh; the menu now loops until you select 4.
+
+### Important implementation notes
+- Chunking and offsets:
+  - Chunk i maps to offset i*32; last chunk may be shorter
+  - Fixed-stride per seeder: seed k handles chunk indices where i % total_seeds == k
+- File layout:
+  - Seeder’s source files: `files/seed<portIndex+1>/<portIndex+1>/`
+  - Temporary part files: `seeders/<filename>.part-<seed_idx>`
+  - Final file: `files/seed<me>/<me>/<first_source_id>/<filename>`
+- Concurrency:
+  - One worker thread per available seeder
+  - Networking per chunk: connect → request → receive → write
+  - Throttled by `usleep(delay)` between chunk requests
+- Server/Seeder behavior:
+  - `port_request` handles `LIST`, `FILESIZE`, `DOWNLOAD` and serves exactly up to 32 bytes from requested offset, if available
+
+This is the complete end-to-end: Option 1 discovers and deduplicates available files, Option 2 parallelizes download by chunk across seeders and assembles the final file, and Option 3 reports current and completed progress.
