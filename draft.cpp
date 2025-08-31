@@ -762,18 +762,42 @@ void multi_seed_dl(const char* filename, const std::vector<int>& available_seeds
 
     // Assemble final file from part files
     for (long long chunk = 0; chunk < chunks; ++chunk) {
+        // Calculate which seed/peer this chunk came from using modulo operation
+        // If total_seeds = 3: chunks 0,3,6,9... come from seed 0; chunks 1,4,7,10... from seed 1; chunks 2,5,8,11... from seed 2
         int seed_idx = chunk % total_seeds;
+        
+        // Construct the filename for the part file: seeders/filename.part-{seed_index}
         std::string part_filename = std::string("seeders/") + filename + ".part-" + std::to_string(seed_idx);
+        
+        // Open the part file for reading in binary mode
         FILE* part_file = fopen(part_filename.c_str(), "rb");
         if (!part_file) {
-            continue;
+            continue; // Skip to next chunk if file can't be opened
         }
+        
+        // Calculate where to start reading within the part file
+        // This handles the case where multiple chunks are stored in the same part file
+        // Example: chunk 3 with total_seeds=3: (3/3)*1000 = 1000, so read from position 1000 in part-0
         long long offset_in_part = (chunk / total_seeds) * CHUNK_SIZE;
+        
+        // Move the file pointer to the calculated offset within the part file
         fseek(part_file, offset_in_part, SEEK_SET);
+        
+        // Determine the size of this chunk (might be smaller for the last chunk)
+        // Use std::min to ensure we don't read beyond the file's end
         long long this_chunk_size = std::min((long long)CHUNK_SIZE, total_size - chunk * CHUNK_SIZE);
+        
+        // Create a buffer to hold the chunk data
         std::vector<char> buffer(this_chunk_size);
+        
+        // Read the chunk data from the part file into the buffer
+        // Returns the actual number of bytes read
         size_t bytes = fread(buffer.data(), 1, this_chunk_size, part_file);
+        
+        // Write the chunk data to the final assembled file
         fwrite(buffer.data(), 1, bytes, final_file);
+        
+        // Close the part file to free system resources
         fclose(part_file);
     }
     fclose(final_file);

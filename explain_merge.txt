@@ -1,0 +1,87 @@
+I'll explain this code section line by line and provide examples to help you understand how it works.
+
+## Line-by-Line Explanation
+
+**Line 763:** `// Assemble final file from part files`
+- This is a comment explaining that the following code will reconstruct the original file from its downloaded parts
+
+**Line 764:** `for (long long chunk = 0; chunk < chunks; ++chunk) {`
+- Loops through each chunk from 0 to `chunks-1`
+- Each iteration processes one chunk of the file
+
+**Line 765:** `int seed_idx = chunk % total_seeds;`
+- Calculates which seed/peer this chunk came from using modulo operation
+- If `total_seeds = 3`, then chunks 0,3,6,9... come from seed 0; chunks 1,4,7,10... from seed 1; chunks 2,5,8,11... from seed 2
+
+**Line 766:** `std::string part_filename = std::string("seeders/") + filename + ".part-" + std::to_string(seed_idx);`
+- Constructs the filename for the part file
+- Format: `seeders/filename.part-{seed_index}`
+
+**Line 767-769:** 
+```cpp
+FILE* part_file = fopen(part_filename.c_str(), "rb");
+if (!part_file) {
+    continue;
+}
+```
+- Opens the part file for reading in binary mode
+- If the file can't be opened, skips to the next chunk
+
+**Line 770:** `long long offset_in_part = (chunk / total_seeds) * CHUNK_SIZE;`
+- Calculates where to start reading within the part file
+- This handles the case where multiple chunks are stored in the same part file
+
+**Line 771:** `fseek(part_file, offset_in_part, SEEK_SET);`
+- Moves the file pointer to the calculated offset within the part file
+
+**Line 772:** `long long this_chunk_size = std::min((long long)CHUNK_SIZE, total_size - chunk * CHUNK_SIZE);`
+- Determines the size of this chunk (might be smaller for the last chunk)
+- Uses `std::min` to ensure we don't read beyond the file's end
+
+**Line 773:** `std::vector<char> buffer(this_chunk_size);`
+- Creates a buffer to hold the chunk data
+
+**Line 774:** `size_t bytes = fread(buffer.data(), 1, this_chunk_size, part_file);`
+- Reads the chunk data from the part file into the buffer
+- Returns the actual number of bytes read
+
+**Line 775:** `fwrite(buffer.data(), 1, bytes, final_file);`
+- Writes the chunk data to the final assembled file
+
+**Line 776:** `fclose(part_file);`
+- Closes the part file to free system resources
+
+## Example Walkthrough
+
+Let's say you have:
+- `filename = "document.txt"`
+- `total_size = 10000` bytes
+- `CHUNK_SIZE = 1000` bytes
+- `total_seeds = 3`
+- `chunks = 10` (since 10000/1000 = 10)
+
+**Chunk 0:**
+- `seed_idx = 0 % 3 = 0` → reads from `seeders/document.txt.part-0`
+- `offset_in_part = (0 / 3) * 1000 = 0` → starts at beginning of part file
+- `this_chunk_size = min(1000, 10000 - 0*1000) = 1000`
+- Reads 1000 bytes from position 0 in part-0
+
+**Chunk 1:**
+- `seed_idx = 1 % 3 = 1` → reads from `seeders/document.txt.part-1`
+- `offset_in_part = (1 / 3) * 1000 = 0` → starts at beginning of part file
+- `this_chunk_size = min(1000, 10000 - 1*1000) = 1000`
+- Reads 1000 bytes from position 0 in part-1
+
+**Chunk 2:**
+- `seed_idx = 2 % 3 = 2` → reads from `seeders/document.txt.part-2`
+- `offset_in_part = (2 / 3) * 1000 = 0` → starts at beginning of part file
+- `this_chunk_size = min(1000, 10000 - 2*1000) = 1000`
+- Reads 1000 bytes from position 0 in part-2
+
+**Chunk 3:**
+- `seed_idx = 3 % 3 = 0` → reads from `seeders/document.txt.part-0` again
+- `offset_in_part = (3 / 3) * 1000 = 1000` → starts at position 1000 in part-0
+- `this_chunk_size = min(1000, 10000 - 3*1000) = 1000`
+- Reads 1000 bytes from position 1000 in part-0
+
+This pattern continues, cycling through the 3 seed files and reading sequential chunks from each one to reconstruct the original file in the correct order.
